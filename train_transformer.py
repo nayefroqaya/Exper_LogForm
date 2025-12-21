@@ -75,7 +75,7 @@ x_test, y_test = testing_data['x'], testing_data['y']
 del testing_data
 del training_data
 print('----done')
-exit()
+#exit()
 train_generator = DataGenerator(x_train, y_train, args.window_size)
 test_generator = DataGenerator(x_test, y_test, args.window_size)
 train_loader = torch.utils.data.DataLoader(
