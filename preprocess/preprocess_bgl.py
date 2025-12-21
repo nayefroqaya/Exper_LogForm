@@ -7,6 +7,51 @@ import re
 import torch
 from sentence_transformers import SentenceTransformer
 
+# =========================
+# Preprocessing by block
+# =========================
+def preprocess_data_by_block(
+    df,
+    mode,
+    log_name,
+    block_col="Node_block_id",
+    window_size=120
+):
+    x_data, y_data = [], []
+
+    grouped = df.groupby(block_col, sort=False)
+
+    for block_id, df_blk in tqdm(grouped, desc=f"{mode} blocks"):
+        # safety check
+        if len(df_blk) != window_size:
+            continue
+
+        x_data.append(
+            np.array(df_blk["Vector"].tolist())
+        )
+
+        labels = df_blk["Label"].tolist()
+
+        # normal window if all logs are normal
+        if all(l == "-" for l in labels):
+            y = [1, 0]
+        else:
+            y = [0, 1]
+
+        y_data.append(y)
+
+    x_data = np.array(x_data)
+    y_data = np.array(y_data)
+
+    np.savez(
+        f"{OUTPUT_DIR}/{log_name}_{mode}_block_w{window_size}.npz",
+        x=x_data,
+        y=y_data
+    )
+
+    print(f"{mode} saved:",
+          x_data.shape,
+          y_data.shape)
 
 
 def preprocess_data(df, mode, log_name, window_size=120):
@@ -42,69 +87,58 @@ def preprocess_data(df, mode, log_name, window_size=120):
 
 
 
-'''
-def preprocess_data(df, mode):
-    x_data, y_data = [], []
-    if len(df) % 20 != 0:
-        print('error length')
-        return
-
-    num_windows = int(len(df) / 20)
-    for i in tqdm(range(num_windows)):
-        df_blk = df[i*20:i*20+20]
-        x_data.append(np.array(df_blk["Vector"].tolist()))
-        labels = df_blk["Label"].tolist()
-        if labels == ['-']*20:
-            y = [1, 0]
-        else:
-            y = [0, 1]
-        y_data.append(y)
-
-    np.savez(f'preprocessed_data/{log_name}_{mode}_data.npz',
-             x=x_data, y=y_data)
-'''
-
 if __name__ == '__main__':
+    # =========================
+    # Config
+    # =========================
+    LOG_NAME = "BGL"
+    WINDOW_SIZE = 120
 
-    num_workers = 6
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    TRAIN_PKL = "data/train.pkl"
+    TEST_PKL = "data/test.pkl"
 
-    model = SentenceTransformer('distilbert-base-nli-mean-tokens', device=device)
+    OUTPUT_DIR = "preprocessed_data"
 
     # =========================
-    # Load PKL data
+    # Model
     # =========================
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    file_path_train = 'dataset/BGL/1_BGL_Splitted_Datasets/train_df.pkl'
-    file_path_test = 'dataset/BGL/1_BGL_Splitted_Datasets/test_df.pkl'
+    model = SentenceTransformer("distilbert-base-nli-mean-tokens", device=device)
 
-    # Read pickle file
-    df_train = pd.read_pickle(file_path_train)
-    df_test = pd.read_pickle(file_path_test)
+    # =========================
+    # Load data
+    # =========================
+    df_train = pd.read_pickle(TRAIN_PKL)
+    df_test = pd.read_pickle(TEST_PKL)
 
     # =========================
     # Vector embedding
     # =========================
-    print("vector embedding...")
+    print("Vector embedding...")
 
-    # get all unique templates from both sets
-    all_templates = pd.concat([df_train['EventTemplate'], df_test['EventTemplate']]).unique()
+    # collect unique templates from both splits
+    all_templates = pd.concat([df_train["EventTemplate"], df_test["EventTemplate"]]).unique()
 
-    embeddings = model.encode(all_templates, batch_size=64, show_progress_bar=True)
+    embeddings = model.encode(all_templates, batch_size=128, show_progress_bar=True)
 
     template_dict = dict(zip(all_templates, embeddings))
 
     # map vectors
-    df_train['Vector'] = df_train['EventTemplate'].map(template_dict)
-    df_test['Vector'] = df_test['EventTemplate'].map(template_dict)
+    df_train["Vector"] = df_train["EventTemplate"].map(template_dict)
+    df_test["Vector"] = df_test["EventTemplate"].map(template_dict)
 
-    print("done")
+    print("Embedding done.")
 
     # =========================
-    # Preprocess
+    # Run preprocessing
     # =========================
-    preprocess_data(df_train, mode="training", log_name="BGL", window_size=120)
-    preprocess_data(df_test, mode="testing", log_name="BGL", window_size=120)
+    preprocess_data_by_block(df_train, mode="training", log_name=LOG_NAME, window_size=WINDOW_SIZE)
+
+    preprocess_data_by_block(df_test, mode="testing", log_name=LOG_NAME, window_size=WINDOW_SIZE)
+
+
+
 
     '''
     num_workers = 6
