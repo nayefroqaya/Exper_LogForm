@@ -1,8 +1,9 @@
-import os
 import argparse
+import time
+import os
 import random
 import warnings
-import time
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,200 +14,190 @@ from tqdm import tqdm
 from dataloader import DataGenerator
 from model import Model
 
-# =========================
-# Arguments
-# =========================
 parser = argparse.ArgumentParser()
-parser.add_argument('--pretrained_log_name', type=str, default='HDFS', help='pretrained model log name')
+parser.add_argument('--log_name', type=str,
+                    default='BGL', help='log file name')
+parser.add_argument('--window_size', type=int,
+                    default='120', help='log sequence length')
+parser.add_argument('--mode', type=str, default='classifier',
+                    help='use adapter or not')
+parser.add_argument('--num_layers', type=int, default=1,
+                    help='num of encoder layer')
+parser.add_argument('--adapter_size', type=int, default=64,
+                    help='adapter size')
+parser.add_argument('--lr', type=float, default=0.00001)
+parser.add_argument("--resume", type=int, default=0,
+                    help="resume training of model (0/no, 1/yes)")
 parser.add_argument("--load_path", type=str,
-                    default='checkpoints/train_HDFS_classifier_1_64_5e-05-best.pt', help="pretrained model path")
-parser.add_argument('--log_name', type=str, default='BGL', help='current dataset log name')
-parser.add_argument('--tune_mode', type=str, default='adapter', help='adapter, classifier, or full tuning')
-parser.add_argument('--num_layers', type=int, default=1)
-parser.add_argument('--lr', type=float, default=1e-5)
-parser.add_argument('--window_size', type=int, default=120)
-parser.add_argument('--adapter_size', type=int, default=64)
-parser.add_argument('--epoch', type=int, default=20)
+                    default='checkpoints/model-latest.pt', help="latest model path")
 args = parser.parse_args()
-
-# =========================
-# Create folders if they don't exist
-# =========================
-os.makedirs("result", exist_ok=True)
-os.makedirs("checkpoints", exist_ok=True)
-
-suffix = f'{args.log_name}_from_{args.pretrained_log_name}_{args.tune_mode}_{args.num_layers}_{args.adapter_size}_{args.lr}_{args.epoch}'
-with open(f'result/tune_{suffix}.txt', 'w', encoding='utf-8') as f:
+suffix = f'{args.log_name}_{args.mode}_{args.num_layers}_{args.adapter_size}_{args.lr}'
+with open(f'result/train_{suffix}.txt', 'a', encoding='utf-8') as f:
     f.write(str(args)+'\n')
 
-# =========================
-# Hyperparameters
-# =========================
+# hyper-parameters
 EMBEDDING_DIM = 768
 batch_size = 64
-epochs = args.epoch
-
+epochs = 5
+lr = args.lr
 # =========================
 # Device setup
 # =========================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# =========================
-# Fix seeds
-# =========================
+
+# fix all random seeds
 warnings.filterwarnings('ignore')
 torch.manual_seed(123)
 torch.cuda.manual_seed(123)
 np.random.seed(123)
 random.seed(123)
 torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = True
 
+# load data Hdfs
 # =========================
-# Load preprocessed data (dynamic window size)
+# Load preprocessed data
 # =========================
 train_path = f'./preprocess/preprocessed_data/{args.log_name}_training_block_w{args.window_size}.npz'
 test_path = f'./preprocess/preprocessed_data/{args.log_name}_testing_block_w{args.window_size}.npz'
-
 train_data = np.load(train_path, allow_pickle=True)
 test_data = np.load(test_path, allow_pickle=True)
 
+
 x_train, y_train = train_data['x'], train_data['y']
 x_test, y_test = test_data['x'], test_data['y']
-del train_data, test_data
+del test_data
+del test_data
 
-# =========================
-# DataLoaders
-# =========================
+train_generator = DataGenerator(x_train, y_train, args.window_size)
+test_generator = DataGenerator(x_test, y_test, args.window_size)
 train_loader = torch.utils.data.DataLoader(
-    torch.utils.data.TensorDataset(torch.tensor(x_train, dtype=torch.float32),
-                                   torch.tensor(y_train, dtype=torch.float32)),
-    batch_size=batch_size, shuffle=True
-)
+    train_generator, batch_size=batch_size, shuffle=True)
 test_loader = torch.utils.data.DataLoader(
-    torch.utils.data.TensorDataset(torch.tensor(x_test, dtype=torch.float32),
-                                   torch.tensor(y_test, dtype=torch.float32)),
-    batch_size=batch_size, shuffle=False
-)
+    test_generator, batch_size=batch_size, shuffle=False)
 
-# =========================
-# Model
-# =========================
-model = Model(
-    mode='adapter',
-    num_layers=args.num_layers,
-    adapter_size=args.adapter_size,
-    dim=EMBEDDING_DIM,
-    window_size=args.window_size,
-    nhead=8,
-    dim_feedforward=4*EMBEDDING_DIM,
-    dropout=0.1
-)
-
-# Fine-tuning mode
-if args.tune_mode == 'adapter':
-    model.train_adapter()
-elif args.tune_mode == 'classifier':
-    model.train_classifier()
-elif args.tune_mode == 'tuning':
-    for param in model.parameters():
-        param.requires_grad = True
-
-# Load pretrained weights if any
-if args.pretrained_log_name != 'random':
-    checkpoint = torch.load(args.load_path, map_location='cpu')
-    net = checkpoint['net']
-    net.pop('module.fc1.weight', None)
-    net.pop('module.fc1.bias', None)
-    r = model.load_state_dict(net, strict=False)
-    with open(f'result/tune_{suffix}.txt', 'a', encoding='utf-8') as f:
-        f.write(f'Loaded pretrained model {args.load_path}\n')
-        f.write(f'Load result: {r}\n')
-
-# =========================
-# Device and DataParallel handling
-# =========================
-if device.type == "cuda":
-    gpu_count = torch.cuda.device_count()
-    print(f"Available GPUs: {gpu_count}")
-    if gpu_count > 1:
-        print("Using DataParallel on all GPUs")
-        model = nn.DataParallel(model)
-
+model = Model(mode=args.mode, num_layers=args.num_layers, adapter_size=args.adapter_size, dim=EMBEDDING_DIM, window_size=args.window_size, nhead=8, dim_feedforward=4 *
+              EMBEDDING_DIM, dropout=0.1)
 model = model.to(device)
+model = torch.nn.DataParallel(model, device_ids=device_ids)
 
-# =========================
-# Optimizer & Scheduler
-# =========================
-optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0)
+optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=0)
+# scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+#     optimizer, mode='min', factor=0.7, patience=4, threshold=1e-4, verbose=True)
 scheduler = optim.lr_scheduler.OneCycleLR(
-    optimizer, max_lr=args.lr, epochs=epochs, steps_per_epoch=len(train_loader)
-)
+    optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=len(train_loader))
 criterion = nn.BCEWithLogitsLoss()
 
-# =========================
-# Training loop
-# =========================
+start_epoch = -1
+if args.resume == 1:
+    path_checkpoint = args.load_path
+    checkpoint = torch.load(path_checkpoint)
+    model.load_state_dict(checkpoint['net'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    start_epoch = checkpoint['epoch']
+    print("resume training from epoch ", start_epoch)
+
+
+best_acc = np.inf
 best_f1 = 0
 log_interval = 100
+for epoch in range(start_epoch+1, epochs):
+    loss_all, f1_all = [], []
+    train_loss = 0
+    train_pred, train_true = [], []
 
-for epoch in range(epochs):
     model.train()
-    loss_all, train_pred, train_true = [], [], []
     start_time = time.time()
-
-    for batch_idx, (x, y) in enumerate(tqdm(train_loader)):
-        x, y = x.to(device), y.to(device)
-        optimizer.zero_grad()
+    for batch_idx, data in enumerate(tqdm(train_loader)):
+        x, y = data[0].to(device), data[1].to(device)
+        x = x.to(torch.float32)
+        y = y.to(torch.float32)
         out = model(x)
         loss = criterion(out, y)
+
+        optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
         scheduler.step()
 
-        loss_all.append(loss.item())
+        train_loss += loss.item()
         train_pred.extend(out.argmax(1).tolist())
         train_true.extend(y.argmax(1).tolist())
 
         if batch_idx % log_interval == 0 and batch_idx > 0:
+            cur_loss = train_loss / log_interval
+            # scheduler.step(cur_loss)
             cur_f1 = f1_score(train_true, train_pred)
-            time_cost = time.time() - start_time
-            print(f"| epoch {epoch} | batch {batch_idx} | loss {np.mean(loss_all):.5f} | f1 {cur_f1:.5f} | time {time_cost:.2f}s | lr {scheduler.get_last_lr()}")
-            with open(f'result/tune_{suffix}.txt', 'a', encoding='utf-8') as f:
-                f.write(f"| epoch {epoch} | batch {batch_idx} | loss {np.mean(loss_all):.5f} | f1 {cur_f1:.5f} | time {time_cost:.2f}s | lr {scheduler.get_last_lr()}\n")
-            loss_all, train_pred, train_true = [], [], []
+            time_cost = time.time()-start_time
+
+            with open(f'result/train_{suffix}.txt', 'a', encoding='utf-8') as f:
+                f.write(f'| epoch {epoch:3d} | {batch_idx:5d}/{len(train_loader):5d} batches | '
+                        f'loss {cur_loss:2.5f} |'
+                        f'f1 {cur_f1:.5f} |'
+                        f'time {time_cost:4.2f} |'
+                        f'lr {scheduler.get_last_lr()}\n')
+            print(f'| epoch {epoch:3d} | {batch_idx:5d}/{len(train_loader):5d} batches | '
+                  f'loss {cur_loss} |'
+                  f'f1 {cur_f1}',
+                  f'lr {scheduler.get_last_lr()}')
+
+            loss_all.append(train_loss)
+            f1_all.append(cur_f1)
+
             start_time = time.time()
+            train_loss = 0
+            train_acc = 0
 
-    # =========================
-    # Evaluation
-    # =========================
+    train_loss = sum(loss_all) / len(train_loader)
+    print("epoch : {}/{}, loss = {:.6f}".format(epoch, epochs, train_loss))
+
     model.eval()
-    y_pred_list, y_true_list = [], []
+    n = 0.0
+    acc = 0.0
     with torch.no_grad():
-        for x, y in test_loader:
-            x = x.to(device)
+        for batch_idx, data in enumerate(tqdm(test_loader)):
+            x, y = data[0].to(device), data[1].to(device)
+            x = x.to(torch.float32)
+            y = y.to(torch.float32)
             out = model(x).cpu()
-            y_pred_list.append(out)
-            y_true_list.append(y)
+            if batch_idx == 0:
+                y_pred = out
+                y_true = y.cpu()
+            else:
+                y_pred = np.concatenate((y_pred, out), axis=0)
+                y_true = np.concatenate((y_true, y.cpu()), axis=0)
 
-    y_pred = torch.cat(y_pred_list, dim=0).numpy()
-    y_true = torch.cat(y_true_list, dim=0).numpy()
-    y_pred_labels = np.argmax(y_pred, axis=1)
-    y_true_labels = np.argmax(y_true, axis=1)
-    precision, recall, f1, _ = precision_recall_fscore_support(y_true_labels, y_pred_labels, average='binary')
+    # calculate metrics
+    y_true = np.argmax(y_true, axis=1)
+    y_pred = np.argmax(y_pred, axis=1)
+    report = precision_recall_fscore_support(y_true, y_pred, average='binary')
+    with open(f'result/train_{suffix}.txt', 'a', encoding='utf-8') as f:
+        f.write('number of epochs:'+str(epoch)+'\n')
+        f.write('Number of testing data:'+str(x_test.shape[0])+'\n')
+        f.write('Precision:'+str(report[0])+'\n')
+        f.write('Recall:'+str(report[1])+'\n')
+        f.write('F1 score:'+str(report[2])+'\n')
+        f.write('all_loss:'+str(loss_all)+'\n')
+        f.write('\n')
+        f.close()
 
-    print(f"Epoch {epoch}: Precision={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
-    with open(f'result/tune_{suffix}.txt', 'a', encoding='utf-8') as f:
-        f.write(f"Epoch {epoch}: Precision={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}\n")
+    print(f'Number of testing data: {x_test.shape[0]}')
+    print(f'Precision: {report[0]:.4f}')
+    print(f'Recall: {report[1]:.4f}')
+    print(f'F1 score: {report[2]:.4f}')
 
-    # Save checkpoint
+    ckpt_path = 'checkpoints/'
     checkpoint = {
         "net": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
+        'optimizer': optimizer.state_dict(),
         "epoch": epoch
     }
-    if f1 > best_f1:
-        best_f1 = f1
-        torch.save(checkpoint, f'checkpoints/tune_{suffix}-best.pt')
-    torch.save(checkpoint, f'checkpoints/tune_{suffix}-latest.pt')
+    if report[2] > best_f1:
+        best_f1 = report[2]
+        torch.save(checkpoint, os.path.join(
+            ckpt_path, f'train_{suffix}-best.pt'))
+    torch.save(checkpoint, os.path.join(
+        ckpt_path, f'train_{suffix}-latest.pt'))
