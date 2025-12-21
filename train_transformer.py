@@ -78,10 +78,37 @@ train_loader = torch.utils.data.DataLoader(
 test_loader = torch.utils.data.DataLoader(
     test_generator, batch_size=batch_size, shuffle=False)
 
-model = Model(mode=args.mode, num_layers=args.num_layers, adapter_size=args.adapter_size, dim=EMBEDDING_DIM, window_size=args.window_size, nhead=8, dim_feedforward=4 *
-              EMBEDDING_DIM, dropout=0.1)
+
+
+# automatically choose GPU if available, else CPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# if multiple GPUs, get all device IDs
+if torch.cuda.device_count() > 1:
+    device_ids = list(range(torch.cuda.device_count()))
+    print("Using multiple GPUs:", device_ids)
+else:
+    device_ids = None
+
+
+model = Model(
+    mode=args.mode,
+    num_layers=args.num_layers,
+    adapter_size=args.adapter_size,
+    dim=EMBEDDING_DIM,
+    window_size=args.window_size,
+    nhead=8,
+    dim_feedforward=4*EMBEDDING_DIM,
+    dropout=0.1
+)
+
+# move to device
 model = model.to(device)
-model = torch.nn.DataParallel(model, device_ids=device_ids)
+
+# wrap with DataParallel **only if multiple GPUs are available**
+if device_ids and len(device_ids) > 1:
+    model = torch.nn.DataParallel(model, device_ids=device_ids)
 
 optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=0)
 # scheduler = optim.lr_scheduler.ReduceLROnPlateau(
