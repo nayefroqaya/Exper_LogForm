@@ -17,15 +17,25 @@ from model import Model
 # Arguments
 # =========================
 parser = argparse.ArgumentParser()
-parser.add_argument('--pretrained_log_name', type=str, default='HDFS', help='pretrained dataset name')
-parser.add_argument('--load_path', type=str, default='checkpoints/train_HDFS_classifier_1_64_5e-05-best.pt', help='pretrained model path')
-parser.add_argument('--log_name', type=str, default='BGL', help='current dataset name')
-parser.add_argument('--tune_mode', type=str, default='adapter', help='adapter, classifier, or full tuning')
-parser.add_argument('--num_layers', type=int, default=1)
-parser.add_argument('--adapter_size', type=int, default=64)
+# fine-tuning setting
+parser.add_argument('--pretrained_log_name', type=str,
+                    default='HDFS', help='log file name')
+parser.add_argument("--load_path", type=str,
+                    default='checkpoints/train_HDFS_classifier_1_64_5e-05-best.pt', help="latest model path")
+parser.add_argument('--log_name', type=str,
+                    default='BGL', help='log file name')
+parser.add_argument('--tune_mode', type=str, default='adapter',
+                    help='tune adapter or classifier only')
+# model setting
+parser.add_argument('--num_layers', type=int, default=1,
+                    help='num of encoder layer')
 parser.add_argument('--lr', type=float, default=1e-5)
-parser.add_argument('--window_size', type=int, default=120)
-parser.add_argument('--epoch', type=int, default=20)
+parser.add_argument('--window_size', type=int,
+                    default='20', help='log sequence length')
+parser.add_argument('--adapter_size', type=int, default=64,
+                    help='adapter size')
+parser.add_argument('--epoch', type=int, default=20,
+                    help='epoch')
 args = parser.parse_args()
 
 # =========================

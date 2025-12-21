@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--log_name', type=str,
                     default='BGL', help='log file name')
 parser.add_argument('--window_size', type=int,
-                    default='120', help='log sequence length')
+                    default='20', help='log sequence length')
 parser.add_argument('--mode', type=str, default='classifier',
                     help='use adapter or not')
 parser.add_argument('--num_layers', type=int, default=1,
