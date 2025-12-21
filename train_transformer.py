@@ -68,7 +68,7 @@ test_data = np.load(test_path, allow_pickle=True)
 
 x_train, y_train = train_data['x'], train_data['y']
 x_test, y_test = test_data['x'], test_data['y']
-del test_data
+del train_data
 del test_data
 
 train_generator = DataGenerator(x_train, y_train, args.window_size)
