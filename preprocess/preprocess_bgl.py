@@ -94,9 +94,6 @@ if __name__ == '__main__':
     LOG_NAME = "BGL"
     WINDOW_SIZE = 120
 
-    TRAIN_PKL = "data/train.pkl"
-    TEST_PKL = "data/test.pkl"
-
     OUTPUT_DIR = "preprocessed_data"
 
     # =========================
@@ -114,8 +111,8 @@ if __name__ == '__main__':
     # =========================
     # Load data
     # =========================
-    df_train = pd.read_pickle(TRAIN_PKL)
-    df_test = pd.read_pickle(TEST_PKL)
+    df_train = pd.read_pickle(file_path_train)
+    df_test = pd.read_pickle(file_path_test)
 
     # =========================
     # Vector embedding
