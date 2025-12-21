@@ -66,9 +66,9 @@ torch.backends.cudnn.deterministic = True
 #    f'./preprocessed_data/{args.log_name}_testing.npz', allow_pickle=True)
 
 training_data = np.load(
-    f'./preprocessed_data/{args.log_name}_training_block_w{args.window_size}.npz', allow_pickle=True)
+    f'./preprocess/preprocessed_data/{args.log_name}_training_block_w{args.window_size}.npz', allow_pickle=True)
 testing_data = np.load(
-    f'./preprocessed_data/{args.log_name}_testing_block_w{args.window_size}.npz', allow_pickle=True)
+    f'./preprocess/preprocessed_data/{args.log_name}_testing_block_w{args.window_size}.npz', allow_pickle=True)
 
 x_train, y_train = training_data['x'], training_data['y']
 x_test, y_test = testing_data['x'], testing_data['y']
