@@ -44,10 +44,10 @@ EMBEDDING_DIM = 768
 batch_size = 64
 epochs = 5
 lr = args.lr
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device_ids = [0, 1]
-print('Using device = ', device)
-print(f'Model mode is {args.mode}')
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device_ids = [0, 1]
+#print('Using device = ', device)
+#print(f'Model mode is {args.mode}')
 
 # fix all random seeds
 warnings.filterwarnings('ignore')
