@@ -8,6 +8,41 @@ import torch
 from sentence_transformers import SentenceTransformer
 
 
+
+def preprocess_data(df, mode, log_name, window_size=120):
+    x_data, y_data = [], []
+
+    if len(df) % window_size != 0:
+        raise ValueError(f'Data length must be divisible by {window_size}')
+
+    num_windows = len(df) // window_size
+
+    for i in tqdm(range(num_windows)):
+        df_blk = df.iloc[i*window_size:(i+1)*window_size]
+
+        x_data.append(
+            np.array(df_blk["Vector"].tolist())
+        )
+
+        labels = df_blk["Label"].tolist()
+
+        # normal window if ALL logs are normal
+        if all(l == '-' for l in labels):
+            y = [1, 0]   # normal
+        else:
+            y = [0, 1]   # anomaly
+
+        y_data.append(y)
+
+    np.savez(
+        f'preprocessed_data/{log_name}_{mode}_w{window_size}_data.npz',
+        x=np.array(x_data),
+        y=np.array(y_data)
+    )
+
+
+
+'''
 def preprocess_data(df, mode):
     x_data, y_data = [], []
     if len(df) % 20 != 0:
@@ -27,9 +62,51 @@ def preprocess_data(df, mode):
 
     np.savez(f'preprocessed_data/{log_name}_{mode}_data.npz',
              x=x_data, y=y_data)
-
+'''
 
 if __name__ == '__main__':
+
+    num_workers = 6
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    model = SentenceTransformer('distilbert-base-nli-mean-tokens', device=device)
+
+    # =========================
+    # Load PKL data
+    # =========================
+
+    file_path_train = 'dataset/BGL/1_BGL_Splitted_Datasets/train_df.pkl'
+    file_path_test = 'dataset/BGL/1_BGL_Splitted_Datasets/test_df.pkl'
+
+    # Read pickle file
+    df_train = pd.read_pickle(file_path_train)
+    df_test = pd.read_pickle(file_path_test)
+
+    # =========================
+    # Vector embedding
+    # =========================
+    print("vector embedding...")
+
+    # get all unique templates from both sets
+    all_templates = pd.concat([df_train['EventTemplate'], df_test['EventTemplate']]).unique()
+
+    embeddings = model.encode(all_templates, batch_size=64, show_progress_bar=True)
+
+    template_dict = dict(zip(all_templates, embeddings))
+
+    # map vectors
+    df_train['Vector'] = df_train['EventTemplate'].map(template_dict)
+    df_test['Vector'] = df_test['EventTemplate'].map(template_dict)
+
+    print("done")
+
+    # =========================
+    # Preprocess
+    # =========================
+    preprocess_data(df_train, mode="training", log_name="BGL", window_size=120)
+    preprocess_data(df_test, mode="testing", log_name="BGL", window_size=120)
+
+    '''
     num_workers = 6
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = SentenceTransformer(
@@ -74,3 +151,4 @@ if __name__ == '__main__':
     # preprocess data
     preprocess_data(df_train, 'training')
     preprocess_data(df_test, 'testing')
+    '''
