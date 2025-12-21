@@ -31,7 +31,7 @@ parser.add_argument('--num_layers', type=int, default=1,
                     help='num of encoder layer')
 parser.add_argument('--lr', type=float, default=1e-5)
 parser.add_argument('--window_size', type=int,
-                    default='20', help='log sequence length')
+                    default='120', help='log sequence length')
 parser.add_argument('--adapter_size', type=int, default=64,
                     help='adapter size')
 parser.add_argument('--epoch', type=int, default=20,
