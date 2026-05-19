@@ -1,0 +1,79 @@
+# Configuration for PKL dataset selection and LogFormer preprocessing
+
+# Experiment type:
+#   in_domain      = use one dataset train/val/test
+#   cross_dataset  = use source train datasets + target val/test + optional target-normal fraction
+setting: cross_dataset
+
+# Output NPZ name prefix.
+# For example: BGL, SP_150MB_ratio, or BGL_HDFS_TH_1G_to_SP_150MB_ratio
+log_name: BGL_HDFS_TH_1G_to_SP_150MB_ratio
+
+# Sequence/window size
+window_size: 120
+
+# Existing block column in PKL files.
+# This will NOT be reassigned or prefixed.
+block_col: Node_block_id
+
+# Where to save generated .npz files
+output_dir: preprocess/preprocessed_data
+
+# Random seed for sampling target normal blocks
+seed: 123
+
+# Embedding settings
+embedding_model: distilbert-base-nli-mean-tokens
+embed_batch_size: 128
+device: null   # null = auto choose cuda if available else cpu
+
+# --------------------------------------------------
+# Dataset registry
+# --------------------------------------------------
+# Add/edit dataset paths here.
+# Each dataset must have train, val, and test PKL paths.
+datasets:
+  BGL:
+    train_pkl: /storage/home/roqaya/Exper_LogForm/dataset/BGL/1_BGL_Splitted_Datasets/train_df.pkl
+    val_pkl: /storage/home/roqaya/Exper_LogForm/dataset/BGL/1_BGL_Splitted_Datasets/val_df.pkl
+    test_pkl: /storage/home/roqaya/Exper_LogForm/dataset/BGL/1_BGL_Splitted_Datasets/test_df.pkl
+
+  HDFS:
+    train_pkl: /storage/home/roqaya/Exper_LogForm/dataset/HDFS/1_HDFS_Splitted_Datasets/train_df.pkl
+    val_pkl: /storage/home/roqaya/Exper_LogForm/dataset/HDFS/1_HDFS_Splitted_Datasets/val_df.pkl
+    test_pkl: /storage/home/roqaya/Exper_LogForm/dataset/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
+
+  TH_1G:
+    train_pkl: /storage/home/roqaya/Exper_LogForm/dataset/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
+    val_pkl: /storage/home/roqaya/Exper_LogForm/dataset/TH_1G/1_TH_1G_Splitted_Datasets/val_df.pkl
+    test_pkl: /storage/home/roqaya/Exper_LogForm/dataset/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
+
+  SP_150MB_ratio:
+    train_pkl: ../NovaAD_Plus/datasets/SP_150MB_ratio/1_BGL_Splitted_Datasets/3_SP_150MB_ratio_train_df.pkl
+    val_pkl: ../NovaAD_Plus/datasets/SP_150MB_ratio/3_SP_150MB_ratio_Splitted_Datasets/3_SP_150MB_ratio_val_df.pkl
+    test_pkl: ../NovaAD_Plus/datasets/SP_150MB_ratio/3_SP_150MB_ratio_Splitted_Datasets/3_SP_150MB_ratio_test_df.pkl
+
+# --------------------------------------------------
+# In-domain selection
+# --------------------------------------------------
+# Used only when setting: in_domain
+in_domain_dataset_name: BGL
+
+# --------------------------------------------------
+# Cross-dataset selection
+# --------------------------------------------------
+# Used only when setting: cross_dataset.
+# Training data = train PKLs from all source datasets
+#               + target_normal_fraction of NORMAL BLOCKS from target train PKL.
+# Validation data = target val PKL.
+# Testing data = target test PKL.
+source_dataset_names:
+  - BGL
+  - HDFS
+  - TH_1G
+
+target_dataset_name: SP_150MB_ratio
+
+# Fraction of normal target TRAINING blocks to append to source training data.
+# Example: 0.1 means 10% of normal target train blocks.
+target_normal_fraction: 0.1
