@@ -3,7 +3,7 @@
 Dataset-name based PKL selector + preprocessor for LogFormer.
 
 Run:
-    python preprocess_dataset_selector_from_config.py --config config.yml
+    python preprocess_dataset_selector_from_config_no_overlap.py --config config_cross_dataset.yml
 
 In-domain:
     Uses one dataset's train/val/test PKLs.
@@ -17,8 +17,8 @@ Cross-dataset:
 Important:
 - Uses Original_Label as Label when Original_Label exists.
 - Samples normal target data by Node_block_id blocks, not rows.
-- Keeps existing Node_block_id unchanged.
-- Does not reassign or prefix Node_block_id.
+- In cross_dataset mode, prefixes Node_block_id with dataset/split before concatenation to prevent collisions.
+- Does not delete any rows.
 """
 
 import argparse
@@ -112,6 +112,27 @@ def normalize_label_column(df: pd.DataFrame) -> pd.DataFrame:
 def ensure_block_col(df: pd.DataFrame, block_col: str) -> pd.DataFrame:
     if block_col not in df.columns:
         raise ValueError(f"{block_col} does not exist. Available columns: {list(df.columns)}")
+    return df
+
+
+def prefix_block_ids(df: pd.DataFrame, block_col: str, dataset_name: str, split_name: str) -> pd.DataFrame:
+    """
+    Prevent Node_block_id collisions when different datasets are concatenated.
+
+    This does NOT delete or reorder rows.
+    It only changes the grouping key from:
+        12345
+    to:
+        BGL__train__12345
+    """
+    df = df.copy()
+    df[block_col] = (
+        str(dataset_name)
+        + "__"
+        + str(split_name)
+        + "__"
+        + df[block_col].astype(str)
+    )
     return df
 
 
@@ -277,6 +298,12 @@ def build_cross_dataset(cfg: Dict[str, Any]):
         df_src_train = read_pkl(paths["train_pkl"], src_name, "train")
         df_src_train = normalize_label_column(df_src_train)
         df_src_train = ensure_block_col(df_src_train, block_col)
+
+        # Important fix:
+        # Prefix source block IDs so they cannot collide with other source datasets
+        # or with sampled target-normal blocks after concatenation.
+        # This keeps all rows; it only changes the grouping key.
+        df_src_train = prefix_block_ids(df_src_train, block_col, src_name, "train")
         source_train_dfs.append(df_src_train)
 
     target_paths = get_dataset_paths(cfg, target_name)
@@ -295,6 +322,17 @@ def build_cross_dataset(cfg: Dict[str, Any]):
 
     target_normal = select_normal_blocks(df_target_train, block_col, fraction, seed)
 
+    # Important fix:
+    # Prefix sampled target-normal block IDs before appending to source training data.
+    # This prevents accidental merging with source dataset blocks.
+    # This keeps all sampled rows.
+    target_normal = prefix_block_ids(
+        target_normal,
+        block_col,
+        target_name,
+        "target_train_normal_sample",
+    )
+
     df_train = pd.concat(source_train_dfs + [target_normal], ignore_index=True)
     df_val = df_target_val
     df_test = df_target_test
@@ -305,9 +343,13 @@ def build_cross_dataset(cfg: Dict[str, Any]):
     print(f"  Training rows after append: {len(df_train)}")
     print(f"  Validation rows: {len(df_val)}")
     print(f"  Testing rows: {len(df_test)}")
+    print(f"  Training unique {block_col} after prefixing: {df_train[block_col].nunique()}")
 
     for i, src_df in enumerate(source_train_dfs):
         check_overlap(f"source:{source_names[i]}", src_df, "target_normal_sample", target_normal, block_col)
+    for i in range(len(source_train_dfs)):
+        for j in range(i + 1, len(source_train_dfs)):
+            check_overlap(f"source:{source_names[i]}", source_train_dfs[i], f"source:{source_names[j]}", source_train_dfs[j], block_col)
 
     return df_train, df_val, df_test
 
