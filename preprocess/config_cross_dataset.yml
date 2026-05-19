@@ -52,10 +52,9 @@ datasets:
     test_pkl: /storage/home/roqaya/Exper_LogForm/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
 
   SP_150MB_ratio:
-    train_pkl: ../NovaAD_Plus/datasets/SP_150MB_ratio/1_BGL_Splitted_Datasets/3_SP_150MB_ratio_train_df.pkl
-    val_pkl: ../NovaAD_Plus/datasets/SP_150MB_ratio/3_SP_150MB_ratio_Splitted_Datasets/3_SP_150MB_ratio_val_df.pkl
-    test_pkl: ../NovaAD_Plus/datasets/SP_150MB_ratio/3_SP_150MB_ratio_Splitted_Datasets/3_SP_150MB_ratio_test_df.pkl
-
+      train_pkl: /storage/home/roqaya/Exper_LogForm/datasets/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
+      val_pkl: /storage/home/roqaya/Exper_LogForm/datasets/TH_1G/1_TH_1G_Splitted_Datasets/val_df.pkl
+      test_pkl: /storage/home/roqaya/Exper_LogForm/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
 # --------------------------------------------------
 # In-domain selection
 # --------------------------------------------------
