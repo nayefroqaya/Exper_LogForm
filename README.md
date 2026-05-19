@@ -50,3 +50,32 @@ If you feel helpful, please cite our paper.
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data \
   --pretrained_log_name random
+
+
+## ----------- Cross dataset running : 
+- python preprocess_dataset_selector_from_config.py --config config_cross_dataset.yml
+- python train_transformer_pkl_ready.py \
+  --log_name BGL_HDFS_TH_1G_to_SP_150MB_ratio \
+  --window_size 120 \
+  --preprocessed_dir preprocess/preprocessed_data
+- python tune_transformer_pkl_ready.py \
+  --log_name BGL_HDFS_TH_1G_to_SP_150MB_ratio \
+  --window_size 120 \
+  --preprocessed_dir preprocess/preprocessed_data \
+  --pretrained_log_name SOURCE \
+  --load_path checkpoints/YOUR_SOURCE_MODEL-best.pt
+## ----------- In domain running  : 
+
+- python preprocess_dataset_selector_from_config.py \
+  --config config_cross_dataset.yml
+
+- python train_transformer_pkl_ready.py \
+  --log_name BGL \
+  --window_size 120 \
+  --preprocessed_dir preprocess/preprocessed_data
+
+- python tune_transformer_pkl_ready.py \
+  --log_name BGL \
+  --window_size 120 \
+  --preprocessed_dir preprocess/preprocessed_data \
+  --pretrained_log_name random

@@ -3,7 +3,10 @@
 # Experiment type:
 #   in_domain      = use one dataset train/val/test
 #   cross_dataset  = use source train datasets + target val/test + optional target-normal fraction
-setting: cross_dataset
+
+
+#setting: cross_dataset
+setting: in_domain
 
 # Output NPZ name prefix.
 # For example: BGL, SP_150MB_ratio, or BGL_HDFS_TH_1G_to_SP_150MB_ratio
@@ -76,4 +79,4 @@ target_dataset_name: SP_150MB_ratio
 
 # Fraction of normal target TRAINING blocks to append to source training data.
 # Example: 0.1 means 10% of normal target train blocks.
-target_normal_fraction: 0.1
+target_normal_fraction: 0.20
