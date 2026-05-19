@@ -32,3 +32,21 @@ If you feel helpful, please cite our paper.
   year={2024}
 }
 ```
+
+- cd ~/Exper_LogForm
+
+- python preprocess_bgl_pkl.py \
+  --output_dir preprocess/preprocessed_data \
+  --window_size 120
+
+# 2) Train from generated NPZ files
+- python train_transformer_pkl_ready.py \
+  --log_name BGL \
+  --window_size 120 \
+  --preprocessed_dir preprocess/preprocessed_data
+
+- python tune_transformer_pkl_ready.py \
+  --log_name BGL \
+  --window_size 120 \
+  --preprocessed_dir preprocess/preprocessed_data \
+  --pretrained_log_name random
