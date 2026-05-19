@@ -78,7 +78,8 @@ class TransformerEncoderLayer(nn.Module):
             state['activation'] = F.relu
         super(TransformerEncoderLayer, self).__setstate__(state)
 
-    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+    #def forward(self, src, src_mask=None, src_key_padding_mask=None):
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
         r"""Pass the input through the encoder layer.
 
         Args:
