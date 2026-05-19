@@ -5,8 +5,8 @@
 #   cross_dataset  = use source train datasets + target val/test + optional target-normal fraction
 
 
-#setting: cross_dataset
-setting: in_domain
+setting: cross_dataset
+#setting: in_domain
 
 # Output NPZ name prefix.
 # For example: BGL, SP_150MB_ratio, or BGL_HDFS_TH_1G_to_SP_150MB_ratio
@@ -37,19 +37,19 @@ device: null   # null = auto choose cuda if available else cpu
 # Each dataset must have train, val, and test PKL paths.
 datasets:
   BGL:
-    train_pkl: /storage/home/roqaya/Exper_LogForm/dataset/BGL/1_BGL_Splitted_Datasets/train_df.pkl
-    val_pkl: /storage/home/roqaya/Exper_LogForm/dataset/BGL/1_BGL_Splitted_Datasets/val_df.pkl
-    test_pkl: /storage/home/roqaya/Exper_LogForm/dataset/BGL/1_BGL_Splitted_Datasets/test_df.pkl
+    train_pkl: /storage/home/roqaya/Exper_LogForm/datasets/BGL/1_BGL_Splitted_Datasets/train_df.pkl
+    val_pkl: /storage/home/roqaya/Exper_LogForm/datasets/BGL/1_BGL_Splitted_Datasets/val_df.pkl
+    test_pkl: /storage/home/roqaya/Exper_LogForm/datasets/BGL/1_BGL_Splitted_Datasets/test_df.pkl
 
   HDFS:
-    train_pkl: /storage/home/roqaya/Exper_LogForm/dataset/HDFS/1_HDFS_Splitted_Datasets/train_df.pkl
-    val_pkl: /storage/home/roqaya/Exper_LogForm/dataset/HDFS/1_HDFS_Splitted_Datasets/val_df.pkl
-    test_pkl: /storage/home/roqaya/Exper_LogForm/dataset/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
+    train_pkl: /storage/home/roqaya/Exper_LogForm/datasets/HDFS/1_HDFS_Splitted_Datasets/train_df.pkl
+    val_pkl: /storage/home/roqaya/Exper_LogForm/datasets/HDFS/1_HDFS_Splitted_Datasets/val_df.pkl
+    test_pkl: /storage/home/roqaya/Exper_LogForm/datasets/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
 
   TH_1G:
-    train_pkl: /storage/home/roqaya/Exper_LogForm/dataset/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
-    val_pkl: /storage/home/roqaya/Exper_LogForm/dataset/TH_1G/1_TH_1G_Splitted_Datasets/val_df.pkl
-    test_pkl: /storage/home/roqaya/Exper_LogForm/dataset/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
+    train_pkl: /storage/home/roqaya/Exper_LogForm/datasets/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
+    val_pkl: /storage/home/roqaya/Exper_LogForm/datasets/TH_1G/1_TH_1G_Splitted_Datasets/val_df.pkl
+    test_pkl: /storage/home/roqaya/Exper_LogForm/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
 
   SP_150MB_ratio:
     train_pkl: ../NovaAD_Plus/datasets/SP_150MB_ratio/1_BGL_Splitted_Datasets/3_SP_150MB_ratio_train_df.pkl
