@@ -5,8 +5,8 @@
 #   cross_dataset  = use source train datasets + target val/test + optional target-normal fraction
 
 
-setting: cross_dataset
-#setting: in_domain
+#setting: cross_dataset
+setting: in_domain
 
 # Output NPZ name prefix.
 # For example: BGL, SP_150MB_ratio, or BGL_HDFS_TH_1G_to_SP_150MB_ratio
