@@ -66,7 +66,7 @@ If you feel helpful, please cite our paper.
   --load_path checkpoints/YOUR_SOURCE_MODEL-best.pt
 ## ----------- In domain running  : 
 
-- python preprocess_dataset_selector_from_config.py \
+- python preprocess_dataset_selector_from_config_no_overlap.py \
   --config config_cross_dataset.yml
 
 - python train_transformer_pkl_ready.py \
