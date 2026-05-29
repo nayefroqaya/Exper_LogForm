@@ -13,7 +13,7 @@ setting: in_domain
 log_name: HDFS #------------------------------------------------------------------------------------
 
 # Sequence/window size
-window_size: 120
+window_size: 50 # default 120 and 50 with HDFS
 
 # Existing block column in PKL files.
 # This will NOT be reassigned or prefixed.
