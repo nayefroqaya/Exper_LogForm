@@ -13,7 +13,7 @@ setting: in_domain
 log_name: HDFS #------------------------------------------------------------------------------------
 
 # Sequence/window size
-window_size: 50 # default 120 and 50 with HDFS
+window_size: 120 # default 120 and 50 with HDFS
 
 # How to handle block lengths:
 #   exact         = keep only blocks with len == window_size, good for fixed-window BGL/SP
