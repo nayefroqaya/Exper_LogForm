@@ -50,13 +50,13 @@ If you feel helpful, please cite our paper.
 
 - python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py --config preprocess/config_cross_dataset_last.yml
 
-- python train_transformer_pkl_ready.py \
-  --log_name HDFS \
+- python train_transformer_pkl_ready_last.py \
+  --log_name BGL \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data
 
-- python tune_transformer_pkl_ready.py \
-  --log_name HDFS \
+- python tune_transformer_pkl_ready_last.py \
+  --log_name BGL \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data \
   --pretrained_log_name random
