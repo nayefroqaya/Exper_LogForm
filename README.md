@@ -52,7 +52,7 @@ If you feel helpful, please cite our paper.
 
 - python train_transformer_pkl_ready.py \
   --log_name HDFS \
-  --window_size 50 \
+  --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data
 
 - python tune_transformer_pkl_ready.py \
