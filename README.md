@@ -66,16 +66,16 @@ If you feel helpful, please cite our paper.
   --load_path checkpoints/YOUR_SOURCE_MODEL-best.pt
 ## ----------- In domain running  : 
 
-- python preprocess_dataset_selector_from_config_no_overlap.py \
-  --config config_cross_dataset.yml
+- python preprocess/preprocess_dataset_selector_from_config_no_overlap.py  
+    --config preprocess/config_cross_dataset.yml
 
 - python train_transformer_pkl_ready.py \
-  --log_name BGL \
+  --log_name HDFS \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data
 
 - python tune_transformer_pkl_ready.py \
-  --log_name BGL \
+  --log_name HDFS \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data \
   --pretrained_log_name random
