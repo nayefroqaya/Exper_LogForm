@@ -37,16 +37,21 @@ If you feel helpful, please cite our paper.
 ## ----------- Cross dataset running : 
 - python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py --config preprocess/config_cross_dataset_last.yml
 
-- python train_transformer_pkl_ready.py \
-  --log_name BGL_HDFS_TH_1G_to_SP_150MB_ratio \
+- Train cross-dataset model from scratch
+  python train_transformer_pkl_ready_last.py \
+  --log_name BGL_to_HDFS \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data
-- python tune_transformer_pkl_ready.py \
-  --log_name BGL_HDFS_TH_1G_to_SP_150MB_ratio \
+
+- Tune using pretrained BGL source checkpoint
+python tune_transformer_pkl_ready_last.py \
+  --log_name BGL_to_HDFS \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data \
-  --pretrained_log_name SOURCE \
-  --load_path checkpoints/YOUR_SOURCE_MODEL-best.pt
+  --pretrained_log_name BGL \
+  --load_path checkpoints/train_BGL_classifier_1_64_1e-05-best.pt
+- 
+ ### --load_path checkpoints/YOUR_SOURCE_MODEL-best.pt
 ## ----------- In domain running  : 
 
 - python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py --config preprocess/config_cross_dataset_last.yml
