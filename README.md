@@ -35,7 +35,8 @@ If you feel helpful, please cite our paper.
 
 
 ## ----------- Cross dataset running : 
-- python preprocess_dataset_selector_from_config.py --config config_cross_dataset.yml
+- python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py --config preprocess/config_cross_dataset_last.yml
+
 - python train_transformer_pkl_ready.py \
   --log_name BGL_HDFS_TH_1G_to_SP_150MB_ratio \
   --window_size 120 \
