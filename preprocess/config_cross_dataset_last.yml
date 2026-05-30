@@ -10,7 +10,7 @@ setting: cross_dataset
 
 # Output NPZ name prefix.
 # For example: BGL, SP_150MB_ratio, or BGL_HDFS_TH_1G_to_SP_150MB_ratio
-log_name: BGL_TH_1G_To_SP_150MB_ratio #---------------------------------------------------------------------------------
+log_name: BGL_TH_1G_HDFS_To_SP_150MB_ratio #---------------------------------------------------------------------------------
 
 # Sequence/window size
 window_size: 120 # default 120 and 50 with HDFS
@@ -78,7 +78,7 @@ datasets:
 source_dataset_names:
   - TH_1G
   - BGL
-#  - BGL
+  - HDFS
 
 target_dataset_name: SP_150MB_ratio
 
