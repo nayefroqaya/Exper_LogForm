@@ -77,7 +77,7 @@ datasets:
 # Testing data = target test PKL.
 source_dataset_names:
   - TH_1G
-  - HDFS
+  - BGL
 #  - BGL
 
 target_dataset_name: HDFS
