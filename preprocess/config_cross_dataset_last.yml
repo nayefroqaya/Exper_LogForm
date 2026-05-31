@@ -10,7 +10,7 @@ setting: cross_dataset
 
 # Output NPZ name prefix.
 # For example: BGL, SP_150MB_ratio, or BGL_HDFS_TH_1G_to_SP_150MB_ratio
-log_name: HDFS_SP_150MB_ratio_TH_1G_To_BGL #---------------------------------------------------------------------------------
+log_name: SP_150MB_ratio_TH_1G_BGL_To_HDFS #---------------------------------------------------------------------------------
 
 # Sequence/window size
 window_size: 120 # default 120 and 50 with HDFS
@@ -76,11 +76,11 @@ datasets:
 # Validation data = target val PKL.
 # Testing data = target test PKL.
 source_dataset_names:
-  - HDFS
+  - BGL
   - TH_1G
   - SP_150MB_ratio
 
-target_dataset_name: BGL
+target_dataset_name: HDFS
 
 # Fraction of normal target TRAINING blocks to append to source training data.
 # Example: 0.1 means 10% of normal target train blocks.
