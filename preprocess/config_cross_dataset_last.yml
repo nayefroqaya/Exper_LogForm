@@ -10,7 +10,7 @@ setting: in_domain
 
 # Output NPZ name prefix.
 # For example: BGL, SP_150MB_ratio, or BGL_HDFS_TH_1G_to_SP_150MB_ratio
-log_name: HDFS #---------------------------------------------------------------------------------
+log_name: TH_1G #---------------------------------------------------------------------------------
 
 # Sequence/window size
 window_size: 120 # default 120 and 50 with HDFS
