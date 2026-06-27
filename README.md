@@ -56,7 +56,7 @@ python tune_transformer_pkl_ready_last.py \
 
 - python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py --config preprocess/config_cross_dataset_last.yml
 
-- python train_transformer_pkl_ready_last.py \
+- python train_transformer_pkl_ready_last_paper4.py \
   --log_name BGL \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data
