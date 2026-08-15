@@ -39,13 +39,13 @@ If you feel helpful, please cite our paper.
 
 - Train cross-dataset model from scratch
   python train_transformer_pkl_ready_last.py \
-  --log_name BGL_to_HDFS \
+  --log_name BGL_to_TH_1G \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data
 
 - Tune using pretrained BGL source checkpoint
 python tune_transformer_pkl_ready_last.py \
-  --log_name BGL_to_HDFS \
+  --log_name BGL_to_TH_1G \
   --window_size 120 \
   --preprocessed_dir preprocess/preprocessed_data \
   --pretrained_log_name BGL \
