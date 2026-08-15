@@ -43,7 +43,7 @@ source_dataset_names:
   - BGL
 
 # Target
-target_dataset_name: HDFS
+target_dataset_name: TH_1G
 
 
 # Optional new-name aliases.
@@ -284,7 +284,7 @@ source_best_checkpoint: checkpoints/train_BGL_classifier_1_64_1e-05-best.pt
 source_latest_checkpoint: checkpoints/train_BGL_classifier_1_64_1e-05-latest.pt
 
 
-# HDFS target checkpoints created by tune_transformer.
-target_best_checkpoint: checkpoints/tune_HDFS_from_BGL_adapter_best.pt
+# TH_1G target checkpoints created by tune_transformer.
+target_best_checkpoint: checkpoints/tune_TH_1G_from_BGL_adapter_best.pt
 
-target_latest_checkpoint: checkpoints/tune_HDFS_from_BGL_adapter_latest.pt
+target_latest_checkpoint: checkpoints/tune_TH_1G_from_BGL_adapter_latest.pt
