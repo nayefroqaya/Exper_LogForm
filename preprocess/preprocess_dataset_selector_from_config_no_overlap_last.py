@@ -1,136 +1,131 @@
 #!/usr/bin/env python3
 """
-Multi-source preprocessing for LogFormer.
+Unified LogFormer training.
 
-Supports:
-    - 1, 2, or 3 source datasets
-    - exactly 1 target dataset
+Supports BOTH:
 
-IMPORTANT DESIGN:
-    - Every dataset is preprocessed independently.
-    - Source datasets are NOT concatenated here.
-    - Target data are NOT added to source data here.
-    - No target fraction is sampled here.
-    - The complete target TRAIN split is saved.
-    - The target fraction (normal + anomaly) is sampled later in
-      tune_transformer_pkl_ready_last.py.
+1) IN-DOMAIN
+   setting: in_domain
+   in_domain_dataset_name: BGL
 
-Example:
-    source_dataset_names:
-      - BGL
-      - HDFS
-    target_dataset_name: TH_1G
+   Training:
+       BGL train
+   Model selection:
+       BGL validation
+   Final evaluation:
+       BGL test
 
-Outputs:
-    BGL_training_block_w120.npz
-    BGL_validation_block_w120.npz
-    BGL_testing_block_w120.npz
+2) CROSS-DATASET
+   setting: cross_dataset
+   source_dataset_names:
+     - BGL
+     - HDFS
+   target_dataset_name: TH_1G
 
-    HDFS_training_block_w120.npz
-    HDFS_validation_block_w120.npz
-    HDFS_testing_block_w120.npz
+   Training:
+       combine ALL selected source training NPZs
+   Model selection:
+       macro mean validation F1 across selected source datasets
+   Final source checks:
+       each source test once
 
-    TH_1G_training_block_w120.npz
-    TH_1G_validation_block_w120.npz
-    TH_1G_testing_block_w120.npz
+   IMPORTANT:
+       target data are NOT used by this script.
+       target adaptation is performed later by tune_transformer.
 """
 
 import argparse
 import os
+import random
+import time
+import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
-import pandas as pd
 import torch
-from sentence_transformers import SentenceTransformer
+import torch.nn as nn
+import torch.optim as optim
+import yaml
+from sklearn.metrics import (
+    confusion_matrix,
+    precision_recall_fscore_support,
+)
 from tqdm import tqdm
 
-try:
-    import yaml
-except ImportError as exc:
-    raise ImportError("Install PyYAML first: pip install pyyaml") from exc
-
-
-SEQUENCE_COL = "__logformer_sequence_id__"
+from dataloader import DataGenerator
+from model import Model
 
 
 # ============================================================
 # Configuration
 # ============================================================
 
-def load_config(path: str) -> Dict[str, Any]:
-    path_obj = Path(path)
-
-    if not path_obj.exists():
-        raise FileNotFoundError(f"Config file not found: {path_obj}")
-
-    with open(path_obj, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-
-    if not isinstance(cfg, dict):
-        raise ValueError("YAML configuration must be a dictionary.")
-
-    return cfg
+def load_config(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
-def get_source_names(cfg: Dict[str, Any]) -> List[str]:
+def get_setting(cfg) -> str:
+    setting = str(cfg.get("setting", "in_domain")).strip().lower()
+
+    if setting not in {"in_domain", "cross_dataset"}:
+        raise ValueError(
+            "setting must be either 'in_domain' or 'cross_dataset'."
+        )
+
+    return setting
+
+
+def get_in_domain_name(cfg) -> str:
+    name = cfg.get("in_domain_dataset_name")
+
+    if name is None:
+        raise ValueError(
+            "in_domain_dataset_name is required for in_domain mode."
+        )
+
+    return str(name)
+
+
+def get_source_names(cfg) -> List[str]:
     names = cfg.get("source_dataset_names")
 
     if not isinstance(names, list):
-        raise ValueError("source_dataset_names must be a YAML list.")
+        raise ValueError(
+            "source_dataset_names must be a YAML list."
+        )
 
     names = [str(x) for x in names]
 
     if not (1 <= len(names) <= 3):
         raise ValueError(
-            "source_dataset_names must contain between 1 and 3 datasets."
+            "cross_dataset mode supports 1, 2, or 3 source datasets."
         )
 
     if len(set(names)) != len(names):
         raise ValueError("Duplicate source datasets are not allowed.")
 
+    target = cfg.get("target_dataset_name")
+
+    if target is not None and str(target) in names:
+        raise ValueError(
+            "Target dataset cannot also be a source dataset."
+        )
+
     return names
 
 
-def get_target_name(cfg: Dict[str, Any]) -> str:
-    target = cfg.get("target_dataset_name")
+def get_training_datasets(cfg) -> Tuple[str, List[str]]:
+    setting = get_setting(cfg)
 
-    if target is None:
-        raise ValueError("Missing target_dataset_name.")
+    if setting == "in_domain":
+        return setting, [get_in_domain_name(cfg)]
 
-    return str(target)
-
-
-def validate_experiment(cfg: Dict[str, Any]) -> Tuple[List[str], str]:
-    sources = get_source_names(cfg)
-    target = get_target_name(cfg)
-
-    if target in sources:
-        raise ValueError(
-            f"Target dataset '{target}' cannot also be a source dataset."
-        )
-
-    datasets = cfg.get("datasets")
-    if not isinstance(datasets, dict):
-        raise ValueError("Missing datasets: section in YAML.")
-
-    missing = [
-        name
-        for name in sources + [target]
-        if name not in datasets
-    ]
-
-    if missing:
-        raise ValueError(
-            f"Datasets missing from registry: {missing}. "
-            f"Available: {list(datasets.keys())}"
-        )
-
-    return sources, target
+    return setting, get_source_names(cfg)
 
 
-def get_output_dir(cfg: Dict[str, Any]) -> str:
+def get_preprocessed_dir(cfg):
     return str(
         cfg.get(
             "preprocessed_dir",
@@ -139,653 +134,158 @@ def get_output_dir(cfg: Dict[str, Any]) -> str:
     )
 
 
-def get_dataset_cfg(
-    cfg: Dict[str, Any],
-    dataset_name: str,
-) -> Dict[str, Any]:
-    ds = cfg["datasets"][dataset_name]
-
-    for key in ("train_pkl", "val_pkl", "test_pkl"):
-        if ds.get(key) is None:
-            raise ValueError(
-                f"Dataset '{dataset_name}' missing required key '{key}'."
-            )
-
-    return ds
-
-
 # ============================================================
-# Read and normalize PKL
+# Data helpers
 # ============================================================
 
-def read_pkl(
-    path: str,
+def load_split(
+    preprocessed_dir: str,
     dataset_name: str,
     split_name: str,
-) -> pd.DataFrame:
-    path_obj = Path(path)
+    window_size: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    path = os.path.join(
+        preprocessed_dir,
+        f"{dataset_name}_{split_name}_block_w{window_size}.npz",
+    )
 
-    if not path_obj.exists():
+    if not os.path.exists(path):
         raise FileNotFoundError(
-            f"{dataset_name} {split_name} PKL not found: {path_obj}"
+            f"Missing preprocessed file: {path}"
         )
 
-    print(
-        f"Reading {dataset_name} {split_name}: {path_obj}"
-    )
+    data = np.load(path, allow_pickle=True)
 
-    df = pd.read_pickle(path_obj).copy()
+    x = data["x"]
+    y = data["y"]
 
-    df["__dataset_name__"] = dataset_name
-    df["__split_name__"] = split_name
+    del data
 
-    return df
-
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    if (
-        "processed_EventTemplate" in df.columns
-        and "EventTemplate" not in df.columns
-    ):
-        df = df.rename(
-            columns={
-                "processed_EventTemplate": "EventTemplate"
-            }
+    if len(x) == 0:
+        raise ValueError(
+            f"{dataset_name} {split_name} NPZ is empty."
         )
 
-    # Preserve your existing behavior:
-    # Original_Label is treated as ground truth when available.
-    if "Original_Label" in df.columns:
-        if "Label" in df.columns:
-            df = df.drop(columns=["Label"])
+    return x, y
 
-        df = df.rename(
-            columns={"Original_Label": "Label"}
+
+def to_object_sequences(
+    x,
+    embedding_dim: int,
+):
+    """
+    Convert fixed-length or variable-length x into an object array.
+
+    Each item remains one complete sequence/block.
+    """
+    out = np.empty(len(x), dtype=object)
+
+    for i in range(len(x)):
+        seq = np.asarray(
+            x[i],
+            dtype=np.float32,
         )
 
-    for col in ("EventTemplate", "Label"):
-        if col not in df.columns:
+        if seq.ndim != 2:
             raise ValueError(
-                f"Missing required column '{col}'. "
-                f"Available columns: {list(df.columns)}"
+                f"Invalid sequence shape at index {i}: {seq.shape}"
             )
 
-    return df
+        if seq.shape[1] != embedding_dim:
+            raise ValueError(
+                f"Embedding dimension mismatch at index {i}: "
+                f"got {seq.shape[1]}, expected {embedding_dim}."
+            )
 
-
-def is_normal_label(value) -> bool:
-    if pd.isna(value):
-        return False
-
-    return str(value).strip().lower() in {
-        "-",
-        "normal",
-        "0",
-        "false",
-        "benign",
-    }
-
-
-# ============================================================
-# Block / sequence handling
-# ============================================================
-
-def require_block_col(
-    df: pd.DataFrame,
-    block_col: str,
-    dataset_name: str,
-    split_name: str,
-):
-    if block_col not in df.columns:
-        raise ValueError(
-            f"{dataset_name} {split_name}: "
-            f"'{block_col}' does not exist. "
-            f"Available: {list(df.columns)}"
-        )
-
-
-def check_split_overlap(
-    dataset_name: str,
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    block_col: str,
-    strict: bool,
-):
-    """
-    Checks ORIGINAL block IDs before internal prefixes are created.
-
-    This is especially important for HDFS where one BlockId should
-    belong to only one split.
-    """
-    train_ids = set(
-        train_df[block_col].astype(str).unique()
-    )
-    val_ids = set(
-        val_df[block_col].astype(str).unique()
-    )
-    test_ids = set(
-        test_df[block_col].astype(str).unique()
-    )
-
-    overlaps = {
-        "train-validation": train_ids & val_ids,
-        "train-test": train_ids & test_ids,
-        "validation-test": val_ids & test_ids,
-    }
-
-    print(
-        f"\n{dataset_name} original {block_col} overlap:"
-    )
-
-    has_overlap = False
-
-    for name, ids in overlaps.items():
-        print(f"  {name}: {len(ids)}")
-        has_overlap = has_overlap or len(ids) > 0
-
-    if strict and has_overlap:
-        raise ValueError(
-            f"{dataset_name}: overlap detected between "
-            "train/validation/test original block IDs."
-        )
-
-
-def assign_existing_blocks(
-    df: pd.DataFrame,
-    dataset_name: str,
-    split_name: str,
-    block_col: str,
-) -> pd.DataFrame:
-    """
-    Preserve original Node_block_id and create a safe internal
-    sequence ID.
-
-    Example:
-        Node_block_id = 100
-
-    internal:
-        BGL__train__100
-        HDFS__train__100
-
-    Therefore IDs from different datasets can never collide later.
-    """
-    require_block_col(
-        df,
-        block_col,
-        dataset_name,
-        split_name,
-    )
-
-    out = df.copy()
-
-    out[SEQUENCE_COL] = (
-        str(dataset_name)
-        + "__"
-        + str(split_name)
-        + "__"
-        + out[block_col].astype(str)
-    )
+        out[i] = seq
 
     return out
 
 
-def assign_fixed_nonoverlap_windows(
-    df: pd.DataFrame,
+def print_distribution(
     dataset_name: str,
     split_name: str,
-    window_size: int,
-) -> pd.DataFrame:
-    """
-    Build fixed non-overlapping windows from the current row order.
-
-    Example window_size=120:
-        rows 0..119   -> window 0
-        rows 120..239 -> window 1
-        ...
-
-    No shuffling.
-    Final incomplete window is dropped.
-    """
-    out = df.reset_index(drop=True).copy()
-
-    complete_rows = (
-        len(out) // window_size
-    ) * window_size
-
-    dropped = len(out) - complete_rows
-
-    if complete_rows == 0:
-        raise ValueError(
-            f"{dataset_name} {split_name}: "
-            f"not enough rows for window_size={window_size}."
-        )
-
-    if dropped > 0:
-        print(
-            f"{dataset_name} {split_name}: "
-            f"dropping {dropped} trailing rows "
-            "that do not make a complete window."
-        )
-
-    out = out.iloc[:complete_rows].copy()
-
-    window_numbers = (
-        np.arange(complete_rows) // window_size
-    )
-
-    out[SEQUENCE_COL] = [
-        f"{dataset_name}__{split_name}__window_{i}"
-        for i in window_numbers
-    ]
-
-    return out
-
-
-def prepare_dataset(
-    cfg: Dict[str, Any],
-    dataset_name: str,
-    window_size: int,
-) -> Tuple[
-    pd.DataFrame,
-    pd.DataFrame,
-    pd.DataFrame,
-    str,
-]:
-    ds_cfg = get_dataset_cfg(
-        cfg,
-        dataset_name,
-    )
-
-    block_col = str(
-        ds_cfg.get(
-            "block_col",
-            cfg.get("block_col", "Node_block_id"),
-        )
-    )
-
-    sequence_mode = str(
-        ds_cfg.get(
-            "sequence_mode",
-            "existing_blocks",
-        )
-    )
-
-    block_length_mode = str(
-        ds_cfg.get(
-            "block_length_mode",
-            "keep_variable",
-        )
-    )
-
-    strict_overlap = bool(
-        ds_cfg.get(
-            "strict_split_overlap_check",
-            cfg.get(
-                "strict_split_overlap_check",
-                False,
-            ),
-        )
-    )
-
-    if sequence_mode not in {
-        "existing_blocks",
-        "fixed_nonoverlap_rows",
-    }:
-        raise ValueError(
-            f"{dataset_name}: sequence_mode must be "
-            "'existing_blocks' or 'fixed_nonoverlap_rows'."
-        )
-
-    if block_length_mode not in {
-        "exact",
-        "keep_variable",
-        "pad_truncate",
-    }:
-        raise ValueError(
-            f"{dataset_name}: invalid block_length_mode."
-        )
-
-    print("\n============================================================")
-    print(f"PREPROCESS DATASET: {dataset_name}")
-    print("============================================================")
-    print(f"sequence_mode: {sequence_mode}")
-    print(f"block_length_mode: {block_length_mode}")
-    print(f"window_size: {window_size}")
-    print(f"block_col: {block_col}")
-    print("============================================================")
-
-    train_df = normalize_columns(
-        read_pkl(
-            ds_cfg["train_pkl"],
-            dataset_name,
-            "train",
-        )
-    )
-
-    val_df = normalize_columns(
-        read_pkl(
-            ds_cfg["val_pkl"],
-            dataset_name,
-            "validation",
-        )
-    )
-
-    test_df = normalize_columns(
-        read_pkl(
-            ds_cfg["test_pkl"],
-            dataset_name,
-            "testing",
-        )
-    )
-
-    if sequence_mode == "existing_blocks":
-        require_block_col(
-            train_df,
-            block_col,
-            dataset_name,
-            "train",
-        )
-        require_block_col(
-            val_df,
-            block_col,
-            dataset_name,
-            "validation",
-        )
-        require_block_col(
-            test_df,
-            block_col,
-            dataset_name,
-            "testing",
-        )
-
-        check_split_overlap(
-            dataset_name,
-            train_df,
-            val_df,
-            test_df,
-            block_col,
-            strict_overlap,
-        )
-
-        train_df = assign_existing_blocks(
-            train_df,
-            dataset_name,
-            "train",
-            block_col,
-        )
-        val_df = assign_existing_blocks(
-            val_df,
-            dataset_name,
-            "validation",
-            block_col,
-        )
-        test_df = assign_existing_blocks(
-            test_df,
-            dataset_name,
-            "testing",
-            block_col,
-        )
-
-    else:
-        train_df = assign_fixed_nonoverlap_windows(
-            train_df,
-            dataset_name,
-            "train",
-            window_size,
-        )
-        val_df = assign_fixed_nonoverlap_windows(
-            val_df,
-            dataset_name,
-            "validation",
-            window_size,
-        )
-        test_df = assign_fixed_nonoverlap_windows(
-            test_df,
-            dataset_name,
-            "testing",
-            window_size,
-        )
-
-        # Windows were built to exact size.
-        block_length_mode = "exact"
-
-    return (
-        train_df,
-        val_df,
-        test_df,
-        block_length_mode,
-    )
-
-
-# ============================================================
-# Embeddings
-# ============================================================
-
-def add_vectors_for_dataset(
-    dfs: List[pd.DataFrame],
-    model: SentenceTransformer,
-    batch_size: int,
-) -> List[pd.DataFrame]:
-    """
-    Reuse Vector if all three PKLs already contain it.
-    Otherwise embed unique EventTemplate values across the
-    train/validation/test splits of this dataset.
-    """
-    if all("Vector" in df.columns for df in dfs):
-        print(
-            "Vector column exists in all splits. "
-            "Reusing existing embeddings."
-        )
-        return dfs
-
-    all_templates = pd.concat(
-        [
-            df["EventTemplate"]
-            for df in dfs
-        ],
-        ignore_index=True,
-    )
-
-    all_templates = (
-        all_templates
-        .dropna()
-        .astype(str)
-        .unique()
-    )
+    y,
+):
+    labels = np.argmax(y, axis=1)
 
     print(
-        f"Encoding {len(all_templates)} unique templates"
+        f"{dataset_name} {split_name}: "
+        f"total={len(y)}, "
+        f"normal={int(np.sum(labels == 0))}, "
+        f"anomaly={int(np.sum(labels == 1))}"
     )
-
-    vectors = model.encode(
-        all_templates.tolist(),
-        batch_size=batch_size,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-    )
-
-    lookup = dict(
-        zip(
-            all_templates,
-            vectors,
-        )
-    )
-
-    outputs = []
-
-    for df in dfs:
-        out = df.copy()
-
-        out["Vector"] = (
-            out["EventTemplate"]
-            .astype(str)
-            .map(lookup)
-        )
-
-        if out["Vector"].isna().any():
-            raise ValueError(
-                "Some EventTemplate values could not "
-                "be mapped to embeddings."
-            )
-
-        outputs.append(out)
-
-    return outputs
 
 
 # ============================================================
-# Save NPZ
+# Evaluation helpers
 # ============================================================
 
-def make_npz(
-    df: pd.DataFrame,
-    dataset_name: str,
-    split_name: str,
-    output_dir: str,
-    window_size: int,
-    block_length_mode: str,
+def get_model_state(model):
+    if isinstance(model, nn.DataParallel):
+        return model.module.state_dict()
+
+    return model.state_dict()
+
+
+def evaluate(
+    model,
+    loader,
+    device,
 ):
-    """
-    One NPZ entry = one complete sequence/block.
+    model.eval()
 
-    Label encoding:
-        [1, 0] -> normal
-        [0, 1] -> anomaly
+    pred_all = []
+    true_all = []
 
-    A sequence/block is anomalous if at least one row inside
-    it is anomalous.
-    """
-    x_data = []
-    y_data = []
+    start = time.time()
 
-    normal_count = 0
-    anomaly_count = 0
-    skipped = 0
-    padded = 0
-    truncated = 0
-
-    groups = df.groupby(
-        SEQUENCE_COL,
-        sort=False,
-    )
-
-    for _, block_df in tqdm(
-        groups,
-        desc=f"{dataset_name} {split_name}",
-    ):
-        vectors = np.asarray(
-            block_df["Vector"].tolist(),
-            dtype=np.float32,
-        )
-
-        if (
-            vectors.ndim != 2
-            or len(vectors) == 0
+    with torch.no_grad():
+        for x, y in tqdm(
+            loader,
+            desc="Evaluation",
+            leave=False,
         ):
-            skipped += 1
-            continue
+            x = x.to(device).to(torch.float32)
+            y = y.to(device).to(torch.float32)
 
-        if block_length_mode == "exact":
-            if len(vectors) != window_size:
-                skipped += 1
-                continue
+            out = model(x)
 
-            x_item = vectors
+            pred_all.append(out.cpu())
+            true_all.append(y.cpu())
 
-        elif block_length_mode == "keep_variable":
-            x_item = vectors
+    if not pred_all:
+        raise ValueError("Evaluation loader is empty.")
 
-        else:
-            # pad_truncate
-            if len(vectors) >= window_size:
-                x_item = vectors[:window_size]
+    prediction_time = time.time() - start
 
-                if len(vectors) > window_size:
-                    truncated += 1
+    pred = torch.cat(pred_all, dim=0).numpy()
+    true = torch.cat(true_all, dim=0).numpy()
 
-            else:
-                pad_len = (
-                    window_size - len(vectors)
-                )
+    pred_labels = np.argmax(pred, axis=1)
+    true_labels = np.argmax(true, axis=1)
 
-                pad = np.zeros(
-                    (
-                        pad_len,
-                        vectors.shape[1],
-                    ),
-                    dtype=np.float32,
-                )
-
-                x_item = np.vstack(
-                    [vectors, pad]
-                )
-
-                padded += 1
-
-        labels = block_df["Label"].tolist()
-
-        if all(
-            is_normal_label(v)
-            for v in labels
-        ):
-            y_item = [1, 0]
-            normal_count += 1
-
-        else:
-            y_item = [0, 1]
-            anomaly_count += 1
-
-        x_data.append(x_item)
-        y_data.append(y_item)
-
-    if block_length_mode == "keep_variable":
-        x_data = np.array(
-            x_data,
-            dtype=object,
+    precision, recall, f1, _ = (
+        precision_recall_fscore_support(
+            true_labels,
+            pred_labels,
+            average="binary",
+            zero_division=0,
         )
-    else:
-        x_data = np.asarray(
-            x_data,
-            dtype=np.float32,
-        )
-
-    y_data = np.asarray(
-        y_data,
-        dtype=np.float32,
     )
 
-    if len(y_data) == 0:
-        raise ValueError(
-            f"{dataset_name} {split_name}: "
-            "generated dataset is empty."
-        )
-
-    os.makedirs(
-        output_dir,
-        exist_ok=True,
+    cm = confusion_matrix(
+        true_labels,
+        pred_labels,
     )
 
-    out_path = (
-        Path(output_dir)
-        / f"{dataset_name}_{split_name}_block_w{window_size}.npz"
-    )
-
-    np.savez(
-        out_path,
-        x=x_data,
-        y=y_data,
-    )
-
-    print(f"\nSaved: {out_path}")
-    print(f"  total sequences: {len(y_data)}")
-    print(f"  normal: {normal_count}")
-    print(f"  anomaly: {anomaly_count}")
-    print(f"  skipped: {skipped}")
-    print(f"  padded: {padded}")
-    print(f"  truncated: {truncated}")
+    return {
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "confusion_matrix": cm,
+        "prediction_time": prediction_time,
+    }
 
 
 # ============================================================
@@ -802,140 +302,574 @@ def main():
 
     args = parser.parse_args()
 
-    cfg = load_config(
-        args.config
+    cfg = load_config(args.config)
+
+    setting, training_dataset_names = get_training_datasets(cfg)
+
+    dataset_tag = "_".join(training_dataset_names)
+
+    preprocessed_dir = get_preprocessed_dir(cfg)
+
+    window_size = int(cfg.get("window_size", 120))
+    seed = int(cfg.get("seed", 123))
+
+    embedding_dim = int(cfg.get("embedding_dim", 768))
+    num_layers = int(cfg.get("num_layers", 1))
+    adapter_size = int(cfg.get("adapter_size", 64))
+    nhead = int(cfg.get("nhead", 8))
+    dropout = float(cfg.get("dropout", 0.1))
+    ff_multiplier = int(cfg.get("feedforward_multiplier", 4))
+
+    source_mode = str(cfg.get("source_mode", "classifier"))
+
+    batch_size = int(cfg.get("source_batch_size", 64))
+    epochs = int(cfg.get("source_epochs", 5))
+    lr = float(cfg.get("source_lr", 1e-5))
+
+    result_dir = str(cfg.get("result_dir", "result"))
+    checkpoint_dir = str(cfg.get("checkpoint_dir", "checkpoints"))
+
+    os.makedirs(result_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    suffix = (
+        f"{dataset_tag}_"
+        f"{source_mode}_"
+        f"{num_layers}_"
+        f"{adapter_size}_"
+        f"{lr}"
     )
 
-    source_names, target_name = (
-        validate_experiment(cfg)
+    result_file = os.path.join(
+        result_dir,
+        f"train_{suffix}.txt",
     )
 
-    window_size = int(
-        cfg.get("window_size", 120)
+    default_best_path = os.path.join(
+        checkpoint_dir,
+        f"train_{suffix}-best.pt",
     )
 
-    output_dir = get_output_dir(
-        cfg
+    default_latest_path = os.path.join(
+        checkpoint_dir,
+        f"train_{suffix}-latest.pt",
     )
 
-    embedding_model_name = str(
+    best_path = str(
         cfg.get(
-            "embedding_model",
-            "distilbert-base-nli-mean-tokens",
+            "source_best_checkpoint",
+            default_best_path,
         )
     )
 
-    embed_batch_size = int(
-        cfg.get("embed_batch_size", 128)
-    )
-
-    configured_device = cfg.get("device")
-
-    if configured_device is None:
-        device = (
-            "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
+    latest_path = str(
+        cfg.get(
+            "source_latest_checkpoint",
+            default_latest_path,
         )
-    else:
-        device = str(configured_device)
-
-    dataset_order = (
-        source_names
-        + [target_name]
     )
 
-    # Avoid duplicate processing just in case.
-    dataset_order = list(
-        dict.fromkeys(dataset_order)
+    Path(best_path).parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
+    Path(latest_path).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # ========================================================
+    # Reproducibility
+    # ========================================================
+
+    warnings.filterwarnings("ignore")
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    print("Using device:", device)
+
+    # ========================================================
+    # Load train / validation / test
+    # ========================================================
+
+    train_x_parts = []
+    train_y_parts = []
+
+    validation_sets: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    testing_sets: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
 
     print("\n============================================================")
-    print("LOGFORMER MULTI-SOURCE PREPROCESSING")
+    print("UNIFIED LOGFORMER TRAINING")
     print("============================================================")
-    print("Sources:", source_names)
-    print("Target:", target_name)
+    print("Setting:", setting)
+
+    if setting == "in_domain":
+        print("In-domain dataset:", training_dataset_names[0])
+    else:
+        print("Source datasets:", training_dataset_names)
+        print("Target data used here: NONE")
+
+    print("Training tag:", dataset_tag)
     print("Window size:", window_size)
-    print("Output:", output_dir)
-    print("NO source concatenation here.")
-    print("NO target fraction here.")
     print("============================================================")
 
-    print(
-        f"\nLoading embedding model: "
-        f"{embedding_model_name}"
-    )
-
-    embedding_model = SentenceTransformer(
-        embedding_model_name,
-        device=device,
-    )
-
-    for dataset_name in dataset_order:
-        (
-            train_df,
-            val_df,
-            test_df,
-            block_length_mode,
-        ) = prepare_dataset(
-            cfg,
-            dataset_name,
-            window_size,
-        )
-
-        (
-            train_df,
-            val_df,
-            test_df,
-        ) = add_vectors_for_dataset(
-            [
-                train_df,
-                val_df,
-                test_df,
-            ],
-            embedding_model,
-            embed_batch_size,
-        )
-
-        make_npz(
-            train_df,
+    for dataset_name in training_dataset_names:
+        x_train, y_train = load_split(
+            preprocessed_dir,
             dataset_name,
             "training",
-            output_dir,
             window_size,
-            block_length_mode,
         )
 
-        make_npz(
-            val_df,
+        x_val, y_val = load_split(
+            preprocessed_dir,
             dataset_name,
             "validation",
-            output_dir,
             window_size,
-            block_length_mode,
         )
 
-        make_npz(
-            test_df,
+        x_test, y_test = load_split(
+            preprocessed_dir,
             dataset_name,
             "testing",
-            output_dir,
             window_size,
-            block_length_mode,
         )
 
-        # Free large frames before next dataset.
-        del train_df, val_df, test_df
+        print_distribution(
+            dataset_name,
+            "train",
+            y_train,
+        )
+        print_distribution(
+            dataset_name,
+            "validation",
+            y_val,
+        )
+        print_distribution(
+            dataset_name,
+            "test",
+            y_test,
+        )
+
+        train_x_parts.append(
+            to_object_sequences(
+                x_train,
+                embedding_dim,
+            )
+        )
+
+        train_y_parts.append(
+            np.asarray(
+                y_train,
+                dtype=np.float32,
+            )
+        )
+
+        validation_sets[dataset_name] = (
+            to_object_sequences(
+                x_val,
+                embedding_dim,
+            ),
+            np.asarray(
+                y_val,
+                dtype=np.float32,
+            ),
+        )
+
+        testing_sets[dataset_name] = (
+            to_object_sequences(
+                x_test,
+                embedding_dim,
+            ),
+            np.asarray(
+                y_test,
+                dtype=np.float32,
+            ),
+        )
+
+    # Works for one dataset or many.
+    x_train_combined = np.concatenate(
+        train_x_parts,
+        axis=0,
+    )
+
+    y_train_combined = np.concatenate(
+        train_y_parts,
+        axis=0,
+    )
+
+    rng = np.random.default_rng(seed)
+
+    permutation = rng.permutation(
+        len(y_train_combined)
+    )
+
+    x_train_combined = (
+        x_train_combined[permutation]
+    )
+
+    y_train_combined = (
+        y_train_combined[permutation]
+    )
+
+    print_distribution(
+        dataset_tag,
+        "combined-train",
+        y_train_combined,
+    )
+
+    # ========================================================
+    # DataLoaders
+    # ========================================================
+
+    train_loader = torch.utils.data.DataLoader(
+        DataGenerator(
+            x_train_combined,
+            y_train_combined,
+            window_size,
+        ),
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    validation_loaders = {}
+
+    for name, (x_val, y_val) in validation_sets.items():
+        validation_loaders[name] = torch.utils.data.DataLoader(
+            DataGenerator(
+                x_val,
+                y_val,
+                window_size,
+            ),
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+    testing_loaders = {}
+
+    for name, (x_test, y_test) in testing_sets.items():
+        testing_loaders[name] = torch.utils.data.DataLoader(
+            DataGenerator(
+                x_test,
+                y_test,
+                window_size,
+            ),
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+    # ========================================================
+    # Model
+    # ========================================================
+
+    model = Model(
+        mode=source_mode,
+        num_layers=num_layers,
+        adapter_size=adapter_size,
+        dim=embedding_dim,
+        window_size=window_size,
+        nhead=nhead,
+        dim_feedforward=(
+            ff_multiplier * embedding_dim
+        ),
+        dropout=dropout,
+    )
+
+    model = model.to(device)
+
+    if torch.cuda.device_count() > 1:
+        print(
+            "Using",
+            torch.cuda.device_count(),
+            "GPUs",
+        )
+
+        model = nn.DataParallel(model)
+
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=lr,
+        weight_decay=0,
+    )
+
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr,
+        epochs=epochs,
+        steps_per_epoch=len(train_loader),
+    )
+
+    criterion = nn.BCEWithLogitsLoss()
+
+    # ========================================================
+    # Train
+    # ========================================================
+
+    best_macro_val_f1 = -1.0
+    total_start = time.time()
+
+    with open(
+        result_file,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write("UNIFIED LOGFORMER TRAINING\n")
+        f.write(f"setting={setting}\n")
+        f.write(
+            f"training_datasets={training_dataset_names}\n"
+        )
+        f.write(f"dataset_tag={dataset_tag}\n")
+        f.write(f"window_size={window_size}\n")
+        f.write(f"epochs={epochs}\n")
+        f.write(f"lr={lr}\n")
+        f.write(f"batch_size={batch_size}\n")
+        f.write(
+            f"combined_training_samples="
+            f"{len(y_train_combined)}\n\n"
+        )
+
+    for epoch in range(epochs):
+        model.train()
+
+        losses = []
+
+        for x, y in tqdm(
+            train_loader,
+            desc=f"Epoch {epoch + 1}/{epochs}",
+        ):
+            x = x.to(device).to(torch.float32)
+            y = y.to(device).to(torch.float32)
+
+            optimizer.zero_grad()
+
+            out = model(x)
+
+            loss = criterion(
+                out,
+                y,
+            )
+
+            loss.backward()
+
+            nn.utils.clip_grad_norm_(
+                model.parameters(),
+                0.5,
+            )
+
+            optimizer.step()
+            scheduler.step()
+
+            losses.append(loss.item())
+
+        train_loss = float(
+            np.mean(losses)
+        )
+
+        # ----------------------------------------------------
+        # Validate each selected source/domain independently.
+        #
+        # In-domain:
+        #   this is simply that dataset's validation F1.
+        #
+        # Multi-source:
+        #   macro mean prevents a very large source validation
+        #   set from dominating checkpoint selection.
+        # ----------------------------------------------------
+
+        val_f1s = []
+        val_results = {}
+
+        print(
+            f"\nEpoch {epoch + 1} validation:"
+        )
+
+        for dataset_name in training_dataset_names:
+            result = evaluate(
+                model,
+                validation_loaders[dataset_name],
+                device,
+            )
+
+            val_results[dataset_name] = result
+            val_f1s.append(result["f1"])
+
+            print(
+                f"  {dataset_name}: "
+                f"P={result['precision']:.4f}, "
+                f"R={result['recall']:.4f}, "
+                f"F1={result['f1']:.4f}"
+            )
+
+        macro_val_f1 = float(
+            np.mean(val_f1s)
+        )
+
+        print(
+            f"Epoch {epoch + 1}: "
+            f"loss={train_loss:.6f}, "
+            f"macro_val_f1={macro_val_f1:.4f}"
+        )
+
+        with open(
+            result_file,
+            "a",
+            encoding="utf-8",
+        ) as f:
+            f.write(
+                f"Epoch {epoch + 1}: "
+                f"loss={train_loss:.6f}, "
+                f"macro_val_f1={macro_val_f1:.6f}\n"
+            )
+
+            for dataset_name in training_dataset_names:
+                r = val_results[dataset_name]
+
+                f.write(
+                    f"  {dataset_name}: "
+                    f"P={r['precision']:.6f}, "
+                    f"R={r['recall']:.6f}, "
+                    f"F1={r['f1']:.6f}\n"
+                )
+
+        checkpoint = {
+            "net": get_model_state(model),
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "macro_val_f1": macro_val_f1,
+            "setting": setting,
+            "training_datasets": training_dataset_names,
+            "dataset_tag": dataset_tag,
+            "window_size": window_size,
+        }
+
+        if macro_val_f1 > best_macro_val_f1:
+            best_macro_val_f1 = macro_val_f1
+
+            torch.save(
+                checkpoint,
+                best_path,
+            )
+
+            print(
+                "Saved best checkpoint:",
+                best_path,
+            )
+
+        torch.save(
+            checkpoint,
+            latest_path,
+        )
+
+    # ========================================================
+    # Final test(s) once
+    # ========================================================
+
+    best_checkpoint = torch.load(
+        best_path,
+        map_location=device,
+    )
+
+    if isinstance(model, nn.DataParallel):
+        model.module.load_state_dict(
+            best_checkpoint["net"]
+        )
+    else:
+        model.load_state_dict(
+            best_checkpoint["net"]
+        )
 
     print("\n============================================================")
-    print("PREPROCESSING FINISHED")
+
+    if setting == "in_domain":
+        print("FINAL IN-DOMAIN TEST")
+    else:
+        print("FINAL SOURCE TESTS")
+
     print("============================================================")
-    print("Sources:", source_names)
-    print("Target:", target_name)
-    print(
-        "All datasets were saved independently. "
-        "Target fraction will be sampled during tuning."
-    )
+
+    test_f1s = []
+
+    with open(
+        result_file,
+        "a",
+        encoding="utf-8",
+    ) as f:
+        if setting == "in_domain":
+            f.write("\nFINAL IN-DOMAIN TEST\n")
+        else:
+            f.write("\nFINAL SOURCE TESTS\n")
+
+        for dataset_name in training_dataset_names:
+            result = evaluate(
+                model,
+                testing_loaders[dataset_name],
+                device,
+            )
+
+            test_f1s.append(result["f1"])
+
+            print(
+                f"{dataset_name}: "
+                f"P={result['precision']:.4f}, "
+                f"R={result['recall']:.4f}, "
+                f"F1={result['f1']:.4f}"
+            )
+
+            print(
+                result["confusion_matrix"]
+            )
+
+            f.write(
+                f"{dataset_name}: "
+                f"P={result['precision']}, "
+                f"R={result['recall']}, "
+                f"F1={result['f1']}\n"
+            )
+
+            f.write(
+                f"{result['confusion_matrix']}\n"
+            )
+
+        macro_test_f1 = float(
+            np.mean(test_f1s)
+        )
+
+        total_time = time.time() - total_start
+
+        if len(training_dataset_names) > 1:
+            print(
+                "Macro source test F1:",
+                f"{macro_test_f1:.4f}",
+            )
+
+        print(
+            "Best checkpoint:",
+            best_path,
+        )
+
+        f.write(
+            f"macro_test_f1={macro_test_f1}\n"
+        )
+        f.write(
+            f"total_time={total_time}\n"
+        )
+        f.write(
+            f"best_checkpoint={best_path}\n"
+        )
+
     print("============================================================")
 
 

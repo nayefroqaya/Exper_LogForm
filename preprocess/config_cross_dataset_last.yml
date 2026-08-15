@@ -1,91 +1,127 @@
 # ============================================================
-# LogFormer Multi-Source Cross-Dataset Configuration
-# ============================================================
+# Unified LogFormer Configuration
 #
-# Supports:
-#   - 1, 2, or 3 SOURCE datasets
-#   - exactly 1 TARGET dataset
-#
-# Current example:
-#   Sources = BGL + HDFS
-#   Target  = TH_1G
-#
-# Source pretraining:
-#   FULL source training sets
-#   normal + anomaly
-#
-# Target adaptation:
-#   target_train_fraction = 0.20
-#   -> 20% target NORMAL train blocks
-#   +  20% target ANOMALY train blocks
-#
-# This keeps LogFormer supervised.
-#
-# Window size = 120 for your controlled/fair comparison.
+# Supports BOTH:
+#   1. in_domain
+#   2. cross_dataset
 # ============================================================
 
 
 # ============================================================
-# Experiment selection
+# SELECT EXPERIMENT TYPE
 # ============================================================
-
-setting: cross_dataset
 
 # ------------------------------------------------------------
-# Choose 1, 2, or 3 source datasets.
+# OPTION A: IN-DOMAIN
+# ------------------------------------------------------------
 #
-# ONE SOURCE example:
+# setting: in_domain
+# in_domain_dataset_name: BGL
 #
+# In-domain pipeline:
+#   BGL train
+#       ->
+#   BGL validation selects best checkpoint
+#       ->
+#   BGL test once
+#
+# tune_transformer is NOT needed.
+# If called, it exits cleanly.
+# ------------------------------------------------------------
+
+
+# ------------------------------------------------------------
+# OPTION B: CROSS-DATASET
+# ------------------------------------------------------------
+#
+# Current active example:
+#
+# Sources = BGL + HDFS
+# Target  = TH_1G
+#
+# Source pretraining:
+#   FULL BGL train  normal + anomaly
+#   FULL HDFS train normal + anomaly
+#
+# Target adaptation:
+#   20% TH_1G normal train
+#       +
+#   20% TH_1G anomaly train
+#
+# Target validation:
+#   model selection
+#
+# Target test:
+#   final evaluation once
+# ------------------------------------------------------------
+
+setting: in_domain #cross_dataset
+
+
+# ============================================================
+# IN-DOMAIN SELECTION
+#
+# Used ONLY when:
+# setting: in_domain
+# ============================================================
+
+in_domain_dataset_name: BGL
+
+
+# ============================================================
+# CROSS-DATASET SELECTION
+#
+# Used ONLY when:
+# setting: cross_dataset
+# ============================================================
+
+# Choose 1, 2, or 3 sources.
+
+#source_dataset_names:
+#  - BGL
+#  - HDFS
+
+# Examples:
+#
+# One source:
 # source_dataset_names:
 #   - BGL
 #
-# TWO SOURCE example:
-#
+# Two sources:
 # source_dataset_names:
 #   - BGL
 #   - HDFS
 #
-# THREE SOURCE example:
-#
+# Three sources:
 # source_dataset_names:
 #   - BGL
 #   - HDFS
 #   - SP_150MB_ratio
-#
-# ------------------------------------------------------------
-
-source_dataset_names:
-  - BGL
-  - HDFS
 
 
 # Exactly ONE target.
-# Target must NOT also appear in source_dataset_names.
+# Target cannot also be a source.
 
 target_dataset_name: TH_1G
 
 
 # ============================================================
-# Window / sequence
+# GLOBAL WINDOW / SEQUENCE SETTINGS
 # ============================================================
 
-# Your comparison setting
 window_size: 120
 
-# Existing block/group column
 block_col: Node_block_id
 
 seed: 123
 
 
 # ============================================================
-# Output directories
+# DIRECTORIES
 # ============================================================
 
-# Preprocessor writes NPZ files here
 output_dir: preprocess/preprocessed_data
 
-# Train/tune read NPZ files here
 preprocessed_dir: preprocess/preprocessed_data
 
 result_dir: result
@@ -94,30 +130,32 @@ checkpoint_dir: checkpoints
 
 
 # ============================================================
-# Embedding
+# EMBEDDING
 # ============================================================
 
 embedding_model: distilbert-base-nli-mean-tokens
 
 embed_batch_size: 128
 
-# null = automatically use CUDA if available
+# null = automatically select CUDA if available
 device: null
 
 
 # ============================================================
-# SUPERVISED target adaptation
+# CROSS-DATASET TARGET ADAPTATION
+#
+# Used ONLY by tune_transformer in cross_dataset mode.
 # ============================================================
 
-# IMPORTANT:
+# SUPERVISED LogFormer:
 #
 # 0.20 means:
 #
 #   20% of target NORMAL training blocks
-#                +
+#              +
 #   20% of target ANOMALOUS training blocks
 #
-# It does NOT mean normal-only.
+# It is NOT normal-only.
 #
 # Examples:
 #   0.0125 = 1.25%
@@ -126,14 +164,28 @@ device: null
 #   0.10   = 10%
 #   0.20   = 20%
 #   1.00   = 100%
-#
+
 target_train_fraction: 0.20
 
 target_sampling_seed: 123
 
 
 # ============================================================
-# Dataset registry
+# DATASET REGISTRY
+#
+# Per-dataset:
+#
+# sequence_mode:
+#   existing_blocks
+#       -> use existing Node_block_id grouping
+#
+#   fixed_nonoverlap_rows
+#       -> rebuild consecutive windows from row order
+#
+# block_length_mode:
+#   exact
+#   keep_variable
+#   pad_truncate
 # ============================================================
 
 datasets:
@@ -149,12 +201,14 @@ datasets:
 
     test_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/test_df.pkl
 
-    # Recreate non-overlapping windows from chronological row order.
+    # For 120-window controlled comparison:
+    # rebuild consecutive non-overlapping 120-log sequences.
     #
-    # window_size=120:
-    # rows 0-119    -> sequence 0
-    # rows 120-239  -> sequence 1
-    # ...
+    # If your PKLs ALREADY contain the exact desired 120-log
+    # Node_block_id windows, you may instead use:
+    #
+    # sequence_mode: existing_blocks
+    #
     sequence_mode: fixed_nonoverlap_rows
 
     block_length_mode: exact
@@ -173,20 +227,21 @@ datasets:
 
     test_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
 
-    # HDFS is naturally grouped by BlockId / Node_block_id.
+    # HDFS sequences are naturally grouped by BlockId /
+    # Node_block_id.
     sequence_mode: existing_blocks
 
-    # Keep full variable-length HDFS block.
-    # LogFormer's DataGenerator pads/truncates each block to 120.
+    # Preserve complete variable-length HDFS blocks.
+    # DataGenerator pads/truncates each sequence to window_size.
     block_length_mode: keep_variable
 
-    # Important for HDFS:
-    # stop if the same BlockId is in more than one split.
+    # Recommended for HDFS:
+    # fail if the same original BlockId appears in two splits.
     strict_split_overlap_check: true
 
 
   # ----------------------------------------------------------
-  # Thunderbird 1G
+  # THUNDERBIRD
   # ----------------------------------------------------------
   TH_1G:
 
@@ -196,17 +251,17 @@ datasets:
 
     test_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
 
-    # Your PKLs already contain Node_block_id.
+    # Your PKLs contain Node_block_id.
     sequence_mode: existing_blocks
 
-    # If every Node_block_id has exactly 120 rows, use exact.
+    # If all Node_block_id groups are exactly 120 rows.
     block_length_mode: exact
 
     strict_split_overlap_check: false
 
 
   # ----------------------------------------------------------
-  # Spirit
+  # SPIRIT
   # ----------------------------------------------------------
   SP_150MB_ratio:
 
@@ -218,14 +273,14 @@ datasets:
 
     sequence_mode: existing_blocks
 
-    # If every Node_block_id has exactly 120 rows, use exact.
+    # If all Node_block_id groups are exactly 120 rows.
     block_length_mode: exact
 
     strict_split_overlap_check: false
 
 
 # ============================================================
-# LogFormer model
+# MODEL
 # ============================================================
 
 embedding_dim: 768
@@ -242,11 +297,12 @@ feedforward_multiplier: 4
 
 
 # ============================================================
-# SOURCE PRETRAINING
+# TRAINING
+#
+# Used for:
+#   - in-domain training
+#   - cross-dataset source pretraining
 # ============================================================
-
-# classifier here means the standard source architecture.
-# The whole source model is optimized during source pretraining.
 
 source_mode: classifier
 
@@ -258,10 +314,8 @@ source_lr: 0.00001
 
 
 # ============================================================
-# TARGET TUNING
+# CROSS-DATASET TARGET TUNING
 # ============================================================
-
-# adapter = LogFormer adapter tuning
 
 tune_mode: adapter
 
@@ -271,46 +325,21 @@ target_epochs: 20
 
 target_lr: 0.00001
 
-
-# Original LogFormer tuning removes source fc1 weights
-# and learns a new target classifier head.
-
+# Preserve your previous tuning behavior:
+# do not transfer the source fc1 classifier weights.
 reinitialize_classifier: true
 
 
 # ============================================================
-# OPTIONAL checkpoint overrides
-# ============================================================
+# OPTIONAL CUSTOM CHECKPOINT NAMES
 #
 # Normally LEAVE THESE COMMENTED.
 #
-# The scripts automatically create names based on the selected
-# source datasets.
-#
-# Examples:
-#
-# source_dataset_names:
-#   - BGL
-# gives:
-# checkpoints/train_BGL_classifier_1_64_1e-05-best.pt
-#
-# source_dataset_names:
-#   - BGL
-#   - HDFS
-# gives:
-# checkpoints/train_BGL_HDFS_classifier_1_64_1e-05-best.pt
-#
-# source_dataset_names:
-#   - BGL
-#   - HDFS
-#   - SP_150MB_ratio
-# gives:
-# checkpoints/train_BGL_HDFS_SP_150MB_ratio_classifier_1_64_1e-05-best.pt
-#
-# You only need an explicit override if you want a custom name.
-#
+# If commented, names are created automatically.
+# ============================================================
+
 # source_best_checkpoint: checkpoints/custom_source_best.pt
 # source_latest_checkpoint: checkpoints/custom_source_latest.pt
-#
+
 # target_best_checkpoint: checkpoints/custom_target_best.pt
 # target_latest_checkpoint: checkpoints/custom_target_latest.pt
