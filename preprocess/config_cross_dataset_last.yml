@@ -1,87 +1,290 @@
-# Configuration for PKL dataset selection and LogFormer preprocessing
+# ============================================================
+# LogFormer Supervised Cross-Dataset Experiment
+#
+# Source : BGL
+# Target : HDFS
+#
+# Pipeline:
+#
+# 1. Preprocess BGL and HDFS independently
+#
+# 2. Pre-train LogFormer on:
+#       BGL TRAIN
+#       Normal + Anomaly
+#
+# 3. Select best source checkpoint using:
+#       BGL VALIDATION
+#
+# 4. Load BGL checkpoint and adapt on:
+#       20% HDFS TRAIN
+#       Normal + Anomaly
+#
+# 5. Select best target checkpoint using:
+#       HDFS VALIDATION
+#
+# 6. Final evaluation:
+#       HDFS TEST
+#
+# IMPORTANT:
+# BGL and HDFS are NOT concatenated.
+# HDFS fraction is NOT selected during preprocessing.
+# The fraction is selected inside tune_transformer.
+# ============================================================
 
-# Experiment type:
-#   in_domain      = use one dataset train/val/test
-#   cross_dataset  = use source train datasets + target val/test + optional target-normal fraction
 
+# ============================================================
+# Experiment
+# ============================================================
 
 setting: cross_dataset
-#setting: in_domain
 
-# Output NPZ name prefix.
-# For example: BGL, SP_150MB_ratio, or BGL_HDFS_TH_1G_to_SP_150MB_ratio
-log_name: BGL_to_TH_1G #---------------------------------------------------------------------------------
-
-# Sequence/window size
-window_size: 120 # default 120 and 50 with HDFS
-
-# How to handle block lengths:
-#   exact         = keep only blocks with len == window_size, good for fixed-window BGL/SP
-#   keep_variable = keep full variable-length blocks, good for HDFS BlockId data
-#   pad_truncate  = pad/truncate during preprocessing
-block_length_mode: keep_variable
-
-# Existing block column in PKL files.
-# This will NOT be reassigned or prefixed.
-block_col: Node_block_id
-
-# Where to save generated .npz files
-output_dir: preprocess/preprocessed_data
-
-# Random seed for sampling target normal blocks
-seed: 123
-
-# Embedding settings
-embedding_model: distilbert-base-nli-mean-tokens
-embed_batch_size: 128
-device: null   # null = auto choose cuda if available else cpu
-
-# --------------------------------------------------
-# Dataset registry
-# --------------------------------------------------
-# Add/edit dataset paths here.
-# Each dataset must have train, val, and test PKL paths.
-datasets:
-  BGL:
-    train_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/train_df.pkl
-    val_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/val_df.pkl
-    test_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/test_df.pkl
-
-  HDFS:
-    train_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/train_df.pkl
-    val_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/val_df.pkl
-    test_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
-
-  TH_1G:
-    train_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
-    val_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/val_df.pkl
-    test_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
-
-  SP_150MB_ratio:
-      train_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/train_df.pkl
-      val_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/val_df.pkl
-      test_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/test_df.pkl
-# --------------------------------------------------
-# In-domain selection
-# --------------------------------------------------
-# Used only when setting: in_domain
-#in_domain_dataset_name: BGL #------------------------------------------------------------------------------------
-
-# --------------------------------------------------
-# Cross-dataset selection
-# --------------------------------------------------
-# Used only when setting: cross_dataset.
-#Training data = train PKLs from all source datasets
-#               + target_normal_fraction of NORMAL BLOCKS from target train PKL.
-# Validation data = target val PKL.
-# Testing data = target test PKL.
+# Source
 source_dataset_names:
   - BGL
- # - TH_1G
- # - SP_150MB_ratio
 
-target_dataset_name: TH_1G
+# Target
+target_dataset_name: HDFS
 
-# Fraction of normal target TRAINING blocks to append to source training data.
-# Example: 0.1 means 10% of normal target train blocks.
-target_normal_fraction: 0.20
+
+# Optional new-name aliases.
+# The scripts support either these keys or the above keys.
+# You can leave them commented.
+#
+# source_log_name: BGL
+# target_log_name: HDFS
+
+
+# ============================================================
+# Sequence / window
+# ============================================================
+
+# For LogFormer reproduction use 20.
+window_size: 20
+
+# Existing grouping column in your PKL files.
+block_col: Node_block_id
+
+seed: 123
+
+
+# ============================================================
+# Preprocessed output
+# ============================================================
+
+output_dir: preprocess/preprocessed_data
+
+# train/tune scripts read this key.
+preprocessed_dir: preprocess/preprocessed_data
+
+
+# ============================================================
+# Embedding
+# ============================================================
+
+embedding_model: distilbert-base-nli-mean-tokens
+
+embed_batch_size: 128
+
+# null = automatically use GPU when available
+device: null
+
+
+# ============================================================
+# Target supervised adaptation
+# ============================================================
+
+# IMPORTANT:
+#
+# 0.20 means:
+#
+#   20% of NORMAL HDFS training blocks
+#             +
+#   20% of ANOMALOUS HDFS training blocks
+#
+# It is NOT normal-only anymore.
+#
+# This keeps approximately the same class ratio as the complete
+# HDFS target training set.
+#
+# Other examples:
+#
+# 0.0125 = 1.25%
+# 0.025  = 2.5%
+# 0.05   = 5%
+# 0.10   = 10%
+# 0.20   = 20%
+# 1.00   = 100%
+
+target_train_fraction: 0.20
+
+target_sampling_seed: 123
+
+
+# ============================================================
+# Dataset paths and sequence construction
+# ============================================================
+
+datasets:
+
+  # ----------------------------------------------------------
+  # BGL = SOURCE
+  # ----------------------------------------------------------
+
+  BGL:
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/test_df.pkl
+
+
+    # Reconstruct BGL sequences according to row order.
+    #
+    # With window_size: 20:
+    #
+    # logs 1-20   = sequence 1
+    # logs 21-40  = sequence 2
+    # logs 41-60  = sequence 3
+    #
+    # No overlap.
+    sequence_mode: fixed_nonoverlap_rows
+
+    # fixed_nonoverlap_rows automatically produces
+    # exactly window_size rows per sequence.
+    block_length_mode: exact
+
+
+    # Not needed when fixed_nonoverlap_rows is used.
+    strict_split_overlap_check: false
+
+
+  # ----------------------------------------------------------
+  # HDFS = TARGET
+  # ----------------------------------------------------------
+
+  HDFS:
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
+
+
+    # HDFS sequences are already naturally defined by BlockId /
+    # Node_block_id.
+    sequence_mode: existing_blocks
+
+    # HDFS blocks can have different numbers of log messages.
+    # Keep complete blocks here.
+    # DataGenerator will pad/truncate them to window_size.
+    block_length_mode: keep_variable
+
+
+    # Very important:
+    # make sure the same original HDFS BlockId does not appear
+    # in train/validation/test.
+    strict_split_overlap_check: true
+
+
+  # ----------------------------------------------------------
+  # Other datasets can remain registered for later experiments
+  # ----------------------------------------------------------
+
+  TH_1G:
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
+
+
+  SP_150MB_ratio:
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/test_df.pkl
+
+
+# ============================================================
+# Model architecture
+# ============================================================
+
+embedding_dim: 768
+
+num_layers: 1
+
+adapter_size: 64
+
+nhead: 8
+
+dropout: 0.1
+
+feedforward_multiplier: 4
+
+
+# ============================================================
+# SOURCE PRETRAINING
+# BGL
+# ============================================================
+
+source_mode: classifier
+
+source_batch_size: 64
+
+source_epochs: 5
+
+source_lr: 0.00001
+
+
+# ============================================================
+# TARGET ADAPTATION
+# HDFS
+# ============================================================
+
+# LogFormer adapter tuning
+tune_mode: adapter
+
+target_batch_size: 64
+
+target_epochs: 20
+
+target_lr: 0.00001
+
+
+# Start a new classifier head for the target domain,
+# following the behavior of your previous tuning script.
+reinitialize_classifier: true
+
+
+# ============================================================
+# Results
+# ============================================================
+
+result_dir: result
+
+
+# ============================================================
+# Checkpoints
+# ============================================================
+
+checkpoint_dir: checkpoints
+
+
+# BGL source checkpoint created by train_transformer.
+#
+# IMPORTANT:
+# tune_transformer will load exactly this file.
+source_best_checkpoint: checkpoints/train_BGL_classifier_1_64_1e-05-best.pt
+
+source_latest_checkpoint: checkpoints/train_BGL_classifier_1_64_1e-05-latest.pt
+
+
+# HDFS target checkpoints created by tune_transformer.
+target_best_checkpoint: checkpoints/tune_HDFS_from_BGL_adapter_best.pt
+
+target_latest_checkpoint: checkpoints/tune_HDFS_from_BGL_adapter_latest.pt

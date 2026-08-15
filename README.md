@@ -33,23 +33,25 @@ If you feel helpful, please cite our paper.
 }
 ```
 
+# ============================================================
+# Cross-dataset supervised LogFormer: BGL -> HDFS
+# ============================================================
 
-## ----------- Cross dataset running : 
-- python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py --config preprocess/config_cross_dataset_last.yml
+# 1. Preprocess BGL and HDFS independently
+python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py \
+  --config preprocess/config_cross_dataset_last.yml
 
-- Train cross-dataset model from scratch
-  python train_transformer_pkl_ready_last.py \
-  --log_name BGL_to_TH_1G \
-  --window_size 120 \
-  --preprocessed_dir preprocess/preprocessed_data
 
-- Tune using pretrained BGL source checkpoint
+# 2. Pre-train LogFormer on SOURCE BGL only
+python train_transformer_pkl_ready_last.py \
+  --config preprocess/config_cross_dataset_last.yml
+
+
+# 3. Tune the pretrained BGL model on TARGET HDFS
+#    Uses the configured fraction of HDFS train:
+#    normal + anomaly
 python tune_transformer_pkl_ready_last.py \
-  --log_name BGL_to_TH_1G \
-  --window_size 120 \
-  --preprocessed_dir preprocess/preprocessed_data \
-  --pretrained_log_name BGL \
-  --load_path checkpoints/train_BGL_classifier_1_64_1e-05-best.pt
+  --config preprocess/config_cross_dataset_last.yml
 - 
  ### --load_path checkpoints/YOUR_SOURCE_MODEL-best.pt
 ## ----------- In domain running  : 
