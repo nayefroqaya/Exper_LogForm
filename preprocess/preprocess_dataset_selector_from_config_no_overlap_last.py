@@ -54,8 +54,6 @@ from sklearn.metrics import (
 from tqdm import tqdm
 
 from dataloader import DataGenerator
-from model import Model
-
 
 # ============================================================
 # Configuration
