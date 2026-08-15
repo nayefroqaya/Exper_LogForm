@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
 """
-Supervised target-domain adaptation for LogFormer.
+Supervised target adaptation for multi-source LogFormer.
 
-For BGL -> HDFS:
-    1. Load the best BGL source checkpoint.
-    2. Load COMPLETE HDFS training NPZ.
-    3. Select X% of HDFS TRAIN using STRATIFIED sampling:
-           X% of normal HDFS blocks
-         + X% of anomalous HDFS blocks
-       Thus target adaptation is supervised.
-    4. Tune the adapter on this labeled target fraction.
-    5. Use HDFS validation to select the best checkpoint.
-    6. Evaluate HDFS test exactly once at the end.
+Supports:
+    - 1, 2, or 3 source datasets
+    - exactly one target dataset
+
+Example:
+    source_dataset_names:
+      - BGL
+      - HDFS
+
+    target_dataset_name: TH_1G
+
+    target_train_fraction: 0.20
+
+Pipeline:
+    1. Load checkpoint pretrained on BGL + HDFS.
+    2. Load COMPLETE TH_1G target training NPZ.
+    3. Select 20% of NORMAL target blocks.
+    4. Select 20% of ANOMALOUS target blocks.
+    5. Combine them -> supervised target adaptation set.
+    6. Tune LogFormer adapter.
+    7. Use target validation to choose best checkpoint.
+    8. Evaluate target test ONCE at the end.
 
 IMPORTANT:
-The target fraction is selected at NPZ-entry level.
-Because each NPZ entry is already one complete block/sequence,
-sampling never cuts a Node_block_id block into pieces.
+    The fraction is sampled at NPZ-sequence/block level.
+    A block is never cut into individual log rows.
 """
 
 import argparse
@@ -25,6 +36,7 @@ import random
 import time
 import warnings
 from pathlib import Path
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -42,172 +54,232 @@ from model import Model
 
 
 # ============================================================
-# Helpers
+# Configuration
 # ============================================================
 
 def load_config(path):
-    with open(path, "r", encoding="utf-8") as f:
+    with open(
+        path,
+        "r",
+        encoding="utf-8",
+    ) as f:
         return yaml.safe_load(f) or {}
 
 
-def get_source_name(cfg):
-    if cfg.get("source_log_name"):
-        return str(cfg["source_log_name"])
-
-    names = cfg.get("source_dataset_names")
-    if isinstance(names, list) and len(names) == 1:
-        return str(names[0])
-
-    raise ValueError(
-        "Specify source_log_name: BGL or source_dataset_names: [BGL]"
+def get_source_names(cfg) -> List[str]:
+    names = cfg.get(
+        "source_dataset_names"
     )
 
+    if not isinstance(names, list):
+        raise ValueError(
+            "source_dataset_names must be a YAML list."
+        )
 
-def get_target_name(cfg):
-    if cfg.get("target_log_name"):
-        return str(cfg["target_log_name"])
+    names = [
+        str(x)
+        for x in names
+    ]
 
-    if cfg.get("target_dataset_name"):
-        return str(cfg["target_dataset_name"])
+    if not (1 <= len(names) <= 3):
+        raise ValueError(
+            "Use between 1 and 3 source datasets."
+        )
 
-    raise ValueError(
-        "Specify target_log_name: HDFS or target_dataset_name: HDFS"
+    if len(set(names)) != len(names):
+        raise ValueError(
+            "Duplicate source datasets are not allowed."
+        )
+
+    return names
+
+
+def get_target_name(cfg) -> str:
+    target = cfg.get(
+        "target_dataset_name"
     )
+
+    if target is None:
+        raise ValueError(
+            "Missing target_dataset_name."
+        )
+
+    return str(target)
 
 
 def get_preprocessed_dir(cfg):
     return str(
         cfg.get(
             "preprocessed_dir",
-            cfg.get("output_dir", "preprocess/preprocessed_data"),
+            cfg.get(
+                "output_dir",
+                "preprocess/preprocessed_data",
+            ),
         )
     )
 
 
-def normalize_state_dict_keys(state_dict):
-    """
-    Accept checkpoints saved with or without nn.DataParallel.
-    """
-    clean = {}
+# ============================================================
+# Data helpers
+# ============================================================
 
-    for key, value in state_dict.items():
-        if key.startswith("module."):
-            key = key[len("module."):]
-        clean[key] = value
-
-    return clean
-
-
-def get_model_state(model):
-    if isinstance(model, nn.DataParallel):
-        return model.module.state_dict()
-    return model.state_dict()
-
-
-def evaluate(model, loader, device):
-    model.eval()
-
-    pred_all = []
-    true_all = []
-
-    start = time.time()
-
-    with torch.no_grad():
-        for x, y in tqdm(loader, desc="Evaluation"):
-            x = x.to(device).to(torch.float32)
-            y = y.to(device).to(torch.float32)
-
-            out = model(x)
-
-            pred_all.append(out.cpu())
-            true_all.append(y.cpu())
-
-    if not pred_all:
-        raise ValueError("Evaluation loader is empty.")
-
-    prediction_time = time.time() - start
-
-    pred = torch.cat(pred_all, dim=0).numpy()
-    true = torch.cat(true_all, dim=0).numpy()
-
-    pred_labels = np.argmax(pred, axis=1)
-    true_labels = np.argmax(true, axis=1)
-
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        true_labels,
-        pred_labels,
-        average="binary",
-        zero_division=0,
+def load_split(
+    preprocessed_dir: str,
+    dataset_name: str,
+    split_name: str,
+    window_size: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    path = os.path.join(
+        preprocessed_dir,
+        f"{dataset_name}_{split_name}_block_w{window_size}.npz",
     )
 
-    cm = confusion_matrix(true_labels, pred_labels)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Missing preprocessed file: {path}"
+        )
 
-    return precision, recall, f1, cm, prediction_time
+    data = np.load(
+        path,
+        allow_pickle=True,
+    )
+
+    x = data["x"]
+    y = data["y"]
+
+    del data
+
+    if len(x) == 0:
+        raise ValueError(
+            f"{dataset_name} {split_name} is empty."
+        )
+
+    return x, y
+
+
+def print_distribution(
+    name,
+    y,
+):
+    labels = np.argmax(
+        y,
+        axis=1,
+    )
+
+    print(
+        f"{name}: "
+        f"total={len(y)}, "
+        f"normal={int(np.sum(labels == 0))}, "
+        f"anomaly={int(np.sum(labels == 1))}"
+    )
 
 
 def select_supervised_target_fraction(
     x,
     y,
-    fraction,
-    seed,
+    fraction: float,
+    seed: int,
 ):
     """
-    Stratified supervised target sampling.
+    Stratified target sampling.
 
-    y encoding:
-        [1, 0] = normal   -> argmax 0
-        [0, 1] = anomaly  -> argmax 1
+    Label encoding:
+        [1, 0] -> normal
+        [0, 1] -> anomaly
 
-    For fraction=0.20:
-        select 20% of normal target training blocks
-        AND
-        select 20% of anomalous target training blocks.
+    fraction=0.20 means:
+        20% of target NORMAL train blocks
+        +
+        20% of target ANOMALY train blocks
 
-    This approximately preserves the original HDFS class ratio.
+    This keeps target adaptation supervised and approximately
+    preserves the original target class ratio.
     """
-
-    if not (0 < fraction <= 1):
+    if not (
+        0 < fraction <= 1
+    ):
         raise ValueError(
-            "target_train_fraction must be > 0 and <= 1."
+            "target_train_fraction "
+            "must be > 0 and <= 1."
         )
 
-    labels = np.argmax(y, axis=1)
+    labels = np.argmax(
+        y,
+        axis=1,
+    )
 
-    normal_idx = np.where(labels == 0)[0]
-    anomaly_idx = np.where(labels == 1)[0]
+    normal_idx = np.where(
+        labels == 0
+    )[0]
+
+    anomaly_idx = np.where(
+        labels == 1
+    )[0]
 
     if len(normal_idx) == 0:
         raise ValueError(
-            "Target training data contains no normal blocks."
+            "Target training contains "
+            "no normal blocks."
         )
 
     if len(anomaly_idx) == 0:
         raise ValueError(
-            "Target training data contains no anomalous blocks. "
-            "Supervised LogFormer target adaptation requires both classes."
+            "Target training contains "
+            "no anomalous blocks. "
+            "Supervised target tuning "
+            "requires both classes."
         )
 
-    print("\nTarget TRAIN before sampling:")
-    print(f"  total:   {len(y)}")
-    print(f"  normal:  {len(normal_idx)}")
-    print(f"  anomaly: {len(anomaly_idx)}")
+    print("\nFull TARGET train:")
+    print(
+        f"  total: {len(y)}"
+    )
+    print(
+        f"  normal: {len(normal_idx)}"
+    )
+    print(
+        f"  anomaly: {len(anomaly_idx)}"
+    )
 
     if fraction == 1.0:
-        selected = np.arange(len(y))
+        selected = np.arange(
+            len(y)
+        )
+
     else:
-        rng = np.random.default_rng(seed)
+        rng = np.random.default_rng(
+            seed
+        )
 
         n_normal = max(
             1,
-            int(round(len(normal_idx) * fraction)),
-        )
-        n_anomaly = max(
-            1,
-            int(round(len(anomaly_idx) * fraction)),
+            int(
+                round(
+                    len(normal_idx)
+                    * fraction
+                )
+            ),
         )
 
-        n_normal = min(n_normal, len(normal_idx))
-        n_anomaly = min(n_anomaly, len(anomaly_idx))
+        n_anomaly = max(
+            1,
+            int(
+                round(
+                    len(anomaly_idx)
+                    * fraction
+                )
+            ),
+        )
+
+        n_normal = min(
+            n_normal,
+            len(normal_idx),
+        )
+
+        n_anomaly = min(
+            n_anomaly,
+            len(anomaly_idx),
+        )
 
         selected_normal = rng.choice(
             normal_idx,
@@ -222,26 +294,168 @@ def select_supervised_target_fraction(
         )
 
         selected = np.concatenate(
-            [selected_normal, selected_anomaly]
+            [
+                selected_normal,
+                selected_anomaly,
+            ]
         )
 
-        rng.shuffle(selected)
+        rng.shuffle(
+            selected
+        )
 
-    x_selected = x[selected]
-    y_selected = y[selected]
+    x_selected = x[
+        selected
+    ]
 
-    selected_labels = np.argmax(
+    y_selected = y[
+        selected
+    ]
+
+    print(
+        "\nSelected SUPERVISED "
+        "target fraction:"
+    )
+
+    print(
+        f"  fraction: "
+        f"{fraction:.4f} "
+        f"({fraction * 100:.2f}%)"
+    )
+
+    print_distribution(
+        "  selected target train",
         y_selected,
+    )
+
+    return (
+        x_selected,
+        y_selected,
+    )
+
+
+# ============================================================
+# Model helpers
+# ============================================================
+
+def normalize_state_dict_keys(
+    state_dict,
+):
+    clean = {}
+
+    for key, value in (
+        state_dict.items()
+    ):
+        if key.startswith(
+            "module."
+        ):
+            key = key[
+                len("module.") :
+            ]
+
+        clean[key] = value
+
+    return clean
+
+
+def get_model_state(model):
+    if isinstance(
+        model,
+        nn.DataParallel,
+    ):
+        return model.module.state_dict()
+
+    return model.state_dict()
+
+
+def evaluate(
+    model,
+    loader,
+    device,
+):
+    model.eval()
+
+    pred_all = []
+    true_all = []
+
+    start = time.time()
+
+    with torch.no_grad():
+        for x, y in tqdm(
+            loader,
+            desc="Evaluation",
+            leave=False,
+        ):
+            x = (
+                x.to(device)
+                .to(torch.float32)
+            )
+
+            y = (
+                y.to(device)
+                .to(torch.float32)
+            )
+
+            out = model(x)
+
+            pred_all.append(
+                out.cpu()
+            )
+
+            true_all.append(
+                y.cpu()
+            )
+
+    if not pred_all:
+        raise ValueError(
+            "Evaluation loader is empty."
+        )
+
+    prediction_time = (
+        time.time() - start
+    )
+
+    pred = torch.cat(
+        pred_all,
+        dim=0,
+    ).numpy()
+
+    true = torch.cat(
+        true_all,
+        dim=0,
+    ).numpy()
+
+    pred_labels = np.argmax(
+        pred,
         axis=1,
     )
 
-    print("\nSUPERVISED target fraction:")
-    print(f"  fraction: {fraction:.4f} ({fraction * 100:.2f}%)")
-    print(f"  total:    {len(y_selected)}")
-    print(f"  normal:   {int(np.sum(selected_labels == 0))}")
-    print(f"  anomaly:  {int(np.sum(selected_labels == 1))}")
+    true_labels = np.argmax(
+        true,
+        axis=1,
+    )
 
-    return x_selected, y_selected
+    precision, recall, f1, _ = (
+        precision_recall_fscore_support(
+            true_labels,
+            pred_labels,
+            average="binary",
+            zero_division=0,
+        )
+    )
+
+    cm = confusion_matrix(
+        true_labels,
+        pred_labels,
+    )
+
+    return {
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "confusion_matrix": cm,
+        "prediction_time": prediction_time,
+    }
 
 
 # ============================================================
@@ -250,84 +464,197 @@ def select_supervised_target_fraction(
 
 def main():
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--config",
-        default="config_cross_dataset_last.yml",
+        default="preprocess/config_cross_dataset_last.yml",
     )
+
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    cfg = load_config(
+        args.config
+    )
 
-    # -------------------------
-    # Experiment configuration
-    # -------------------------
-    source_name = get_source_name(cfg)
-    target_name = get_target_name(cfg)
-    preprocessed_dir = get_preprocessed_dir(cfg)
+    source_names = get_source_names(
+        cfg
+    )
 
-    window_size = int(cfg.get("window_size", 120))
-    seed = int(cfg.get("seed", 123))
+    target_name = get_target_name(
+        cfg
+    )
 
-    embedding_dim = int(cfg.get("embedding_dim", 768))
-    num_layers = int(cfg.get("num_layers", 1))
-    adapter_size = int(cfg.get("adapter_size", 64))
-    nhead = int(cfg.get("nhead", 8))
-    dropout = float(cfg.get("dropout", 0.1))
-    feedforward_multiplier = int(cfg.get("feedforward_multiplier", 4))
-
-    source_mode = str(cfg.get("source_mode", "classifier"))
-    source_lr = float(cfg.get("source_lr", 1e-5))
-
-    tune_mode = str(cfg.get("tune_mode", "adapter"))
-    batch_size = int(cfg.get("target_batch_size", 64))
-    epochs = int(cfg.get("target_epochs", 20))
-    lr = float(cfg.get("target_lr", 1e-5))
-
-    # Preferred new key.
-    # For compatibility, your old target_normal_fraction is accepted,
-    # but it is now interpreted as a fraction of BOTH classes.
-    if cfg.get("target_train_fraction") is not None:
-        target_fraction = float(cfg["target_train_fraction"])
-    elif cfg.get("target_normal_fraction") is not None:
-        target_fraction = float(cfg["target_normal_fraction"])
-        print(
-            "WARNING: using legacy YAML key 'target_normal_fraction'. "
-            "In this supervised script it means the fraction sampled "
-            "from BOTH normal and anomalous target training blocks. "
-            "Rename it to 'target_train_fraction' for clarity."
+    if target_name in source_names:
+        raise ValueError(
+            "Target dataset cannot also "
+            "be a source dataset."
         )
-    else:
-        target_fraction = 1.0
+
+    source_tag = "_".join(
+        source_names
+    )
+
+    preprocessed_dir = (
+        get_preprocessed_dir(cfg)
+    )
+
+    window_size = int(
+        cfg.get("window_size", 120)
+    )
+
+    seed = int(
+        cfg.get("seed", 123)
+    )
+
+    embedding_dim = int(
+        cfg.get("embedding_dim", 768)
+    )
+
+    num_layers = int(
+        cfg.get("num_layers", 1)
+    )
+
+    adapter_size = int(
+        cfg.get("adapter_size", 64)
+    )
+
+    nhead = int(
+        cfg.get("nhead", 8)
+    )
+
+    dropout = float(
+        cfg.get("dropout", 0.1)
+    )
+
+    ff_multiplier = int(
+        cfg.get(
+            "feedforward_multiplier",
+            4,
+        )
+    )
+
+    source_mode = str(
+        cfg.get(
+            "source_mode",
+            "classifier",
+        )
+    )
+
+    source_lr = float(
+        cfg.get(
+            "source_lr",
+            1e-5,
+        )
+    )
+
+    tune_mode = str(
+        cfg.get(
+            "tune_mode",
+            "adapter",
+        )
+    )
+
+    batch_size = int(
+        cfg.get(
+            "target_batch_size",
+            64,
+        )
+    )
+
+    epochs = int(
+        cfg.get(
+            "target_epochs",
+            20,
+        )
+    )
+
+    lr = float(
+        cfg.get(
+            "target_lr",
+            1e-5,
+        )
+    )
+
+    target_fraction = float(
+        cfg.get(
+            "target_train_fraction",
+            0.20,
+        )
+    )
 
     sampling_seed = int(
-        cfg.get("target_sampling_seed", seed)
+        cfg.get(
+            "target_sampling_seed",
+            seed,
+        )
     )
 
     reinitialize_classifier = bool(
-        cfg.get("reinitialize_classifier", True)
+        cfg.get(
+            "reinitialize_classifier",
+            True,
+        )
     )
 
-    result_dir = str(cfg.get("result_dir", "result"))
-    checkpoint_dir = str(cfg.get("checkpoint_dir", "checkpoints"))
+    result_dir = str(
+        cfg.get(
+            "result_dir",
+            "result",
+        )
+    )
 
-    os.makedirs(result_dir, exist_ok=True)
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_dir = str(
+        cfg.get(
+            "checkpoint_dir",
+            "checkpoints",
+        )
+    )
+
+    os.makedirs(
+        result_dir,
+        exist_ok=True,
+    )
+
+    os.makedirs(
+        checkpoint_dir,
+        exist_ok=True,
+    )
+
+    # ========================================================
+    # Dynamic source checkpoint name
+    # Must match train_transformer script.
+    # ========================================================
 
     source_suffix = (
-        f"{source_name}_{source_mode}_{num_layers}_{adapter_size}_{source_lr}"
+        f"{source_tag}_"
+        f"{source_mode}_"
+        f"{num_layers}_"
+        f"{adapter_size}_"
+        f"{source_lr}"
     )
 
-    source_checkpoint = cfg.get(
-        "source_best_checkpoint",
+    default_source_checkpoint = (
         os.path.join(
             checkpoint_dir,
             f"train_{source_suffix}-best.pt",
-        ),
+        )
+    )
+
+    source_checkpoint = str(
+        cfg.get(
+            "source_best_checkpoint",
+            default_source_checkpoint,
+        )
     )
 
     target_suffix = (
-        f"{target_name}_from_{source_name}_"
-        f"{tune_mode}_{num_layers}_{adapter_size}_{lr}_{epochs}"
+        f"{target_name}_"
+        f"from_{source_tag}_"
+        f"{tune_mode}_"
+        f"{num_layers}_"
+        f"{adapter_size}_"
+        f"{lr}_"
+        f"{epochs}"
     )
 
     result_file = os.path.join(
@@ -335,29 +662,43 @@ def main():
         f"tune_{target_suffix}.txt",
     )
 
-    best_path = cfg.get(
-        "target_best_checkpoint",
-        os.path.join(
-            checkpoint_dir,
-            f"tune_{target_suffix}-best.pt",
-        ),
+    best_path = str(
+        cfg.get(
+            "target_best_checkpoint",
+            os.path.join(
+                checkpoint_dir,
+                f"tune_{target_suffix}-best.pt",
+            ),
+        )
     )
 
-    latest_path = cfg.get(
-        "target_latest_checkpoint",
-        os.path.join(
-            checkpoint_dir,
-            f"tune_{target_suffix}-latest.pt",
-        ),
+    latest_path = str(
+        cfg.get(
+            "target_latest_checkpoint",
+            os.path.join(
+                checkpoint_dir,
+                f"tune_{target_suffix}-latest.pt",
+            ),
+        )
     )
 
-    Path(best_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(latest_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(best_path).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    # -------------------------
+    Path(latest_path).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # ========================================================
     # Reproducibility
-    # -------------------------
-    warnings.filterwarnings("ignore")
+    # ========================================================
+
+    warnings.filterwarnings(
+        "ignore"
+    )
 
     random.seed(seed)
     np.random.seed(seed)
@@ -371,102 +712,125 @@ def main():
     torch.backends.cudnn.benchmark = False
 
     device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
     )
 
     print("Using device:", device)
 
-    # -------------------------
-    # Load TARGET train/val/test
-    # -------------------------
-    train_path = os.path.join(
+    # ========================================================
+    # Load TARGET only
+    # ========================================================
+
+    x_train_full, y_train_full = load_split(
         preprocessed_dir,
-        f"{target_name}_training_block_w{window_size}.npz",
-    )
-    val_path = os.path.join(
-        preprocessed_dir,
-        f"{target_name}_validation_block_w{window_size}.npz",
-    )
-    test_path = os.path.join(
-        preprocessed_dir,
-        f"{target_name}_testing_block_w{window_size}.npz",
+        target_name,
+        "training",
+        window_size,
     )
 
-    train_npz = np.load(train_path, allow_pickle=True)
-    val_npz = np.load(val_path, allow_pickle=True)
-    test_npz = np.load(test_path, allow_pickle=True)
+    x_val, y_val = load_split(
+        preprocessed_dir,
+        target_name,
+        "validation",
+        window_size,
+    )
 
-    x_train_full, y_train_full = train_npz["x"], train_npz["y"]
-    x_val, y_val = val_npz["x"], val_npz["y"]
-    x_test, y_test = test_npz["x"], test_npz["y"]
+    x_test, y_test = load_split(
+        preprocessed_dir,
+        target_name,
+        "testing",
+        window_size,
+    )
 
-    del train_npz, val_npz, test_npz
-
-    if len(x_train_full) == 0:
-        raise ValueError("Target training NPZ is empty.")
-
-    if len(x_val) == 0:
-        raise ValueError("Target validation NPZ is empty.")
-
-    if len(x_test) == 0:
-        raise ValueError("Target testing NPZ is empty.")
-
-    # -------------------------
-    # SUPERVISED target sampling
-    # -------------------------
-    x_train, y_train = select_supervised_target_fraction(
+    (
+        x_train,
+        y_train,
+    ) = select_supervised_target_fraction(
         x_train_full,
         y_train_full,
         target_fraction,
         sampling_seed,
     )
 
-    del x_train_full, y_train_full
-
-    def print_distribution(name, y):
-        labels = np.argmax(y, axis=1)
-        print(
-            f"{name}: total={len(y)}, "
-            f"normal={int(np.sum(labels == 0))}, "
-            f"anomaly={int(np.sum(labels == 1))}"
-        )
+    del (
+        x_train_full,
+        y_train_full,
+    )
 
     print("\n============================================================")
     print("SUPERVISED TARGET ADAPTATION")
     print("============================================================")
-    print("Source checkpoint:", source_checkpoint)
-    print("Source:", source_name)
+    print("Sources:", source_names)
+    print("Source tag:", source_tag)
     print("Target:", target_name)
-    print(f"Target fraction: {target_fraction * 100:.2f}%")
-    print_distribution("Selected target train", y_train)
-    print_distribution("Target validation", y_val)
-    print_distribution("Target test", y_test)
+    print(
+        "Source checkpoint:",
+        source_checkpoint,
+    )
+    print(
+        "Target fraction:",
+        f"{target_fraction * 100:.2f}%",
+    )
+    print(
+        "Target fraction contains: "
+        "NORMAL + ANOMALY",
+    )
+    print_distribution(
+        "Target validation",
+        y_val,
+    )
+    print_distribution(
+        "Target test",
+        y_test,
+    )
     print("============================================================")
 
-    # -------------------------
+    # ========================================================
     # Data loaders
-    # -------------------------
-    train_loader = torch.utils.data.DataLoader(
-        DataGenerator(x_train, y_train, window_size),
-        batch_size=batch_size,
-        shuffle=True,
+    # ========================================================
+
+    train_loader = (
+        torch.utils.data.DataLoader(
+            DataGenerator(
+                x_train,
+                y_train,
+                window_size,
+            ),
+            batch_size=batch_size,
+            shuffle=True,
+        )
     )
 
-    val_loader = torch.utils.data.DataLoader(
-        DataGenerator(x_val, y_val, window_size),
-        batch_size=batch_size,
-        shuffle=False,
+    val_loader = (
+        torch.utils.data.DataLoader(
+            DataGenerator(
+                x_val,
+                y_val,
+                window_size,
+            ),
+            batch_size=batch_size,
+            shuffle=False,
+        )
     )
 
-    test_loader = torch.utils.data.DataLoader(
-        DataGenerator(x_test, y_test, window_size),
-        batch_size=batch_size,
-        shuffle=False,
+    test_loader = (
+        torch.utils.data.DataLoader(
+            DataGenerator(
+                x_test,
+                y_test,
+                window_size,
+            ),
+            batch_size=batch_size,
+            shuffle=False,
+        )
     )
 
-    # -------------------------
-    # Build target adapter model
-    # -------------------------
+    # ========================================================
+    # Build ADAPTER model
+    # ========================================================
+
     model = Model(
         mode="adapter",
         num_layers=num_layers,
@@ -474,87 +838,137 @@ def main():
         dim=embedding_dim,
         window_size=window_size,
         nhead=nhead,
-        dim_feedforward=feedforward_multiplier * embedding_dim,
+        dim_feedforward=(
+            ff_multiplier
+            * embedding_dim
+        ),
         dropout=dropout,
     )
 
-    # -------------------------
-    # Load SOURCE checkpoint
-    # -------------------------
-    if not os.path.exists(source_checkpoint):
+    # ========================================================
+    # Load combined-source checkpoint
+    # ========================================================
+
+    if not os.path.exists(
+        source_checkpoint
+    ):
         raise FileNotFoundError(
-            f"Source checkpoint not found: {source_checkpoint}"
+            "Source checkpoint not found: "
+            f"{source_checkpoint}\n"
+            "Run train_transformer_pkl_ready_last.py first."
         )
 
-    checkpoint = torch.load(
+    source_ckpt = torch.load(
         source_checkpoint,
         map_location="cpu",
     )
 
-    source_state = normalize_state_dict_keys(
-        checkpoint["net"]
+    source_state = (
+        normalize_state_dict_keys(
+            source_ckpt["net"]
+        )
     )
 
-    # Follow your original tuning behavior:
-    # optionally start the target classifier head fresh.
+    # Original LogFormer tuning removes the source
+    # classifier weights and learns a target classifier.
     if reinitialize_classifier:
-        source_state.pop("fc1.weight", None)
-        source_state.pop("fc1.bias", None)
-        print("Target classifier head will be reinitialized.")
+        source_state.pop(
+            "fc1.weight",
+            None,
+        )
 
-    load_result = model.load_state_dict(
-        source_state,
-        strict=False,
+        source_state.pop(
+            "fc1.bias",
+            None,
+        )
+
+        print(
+            "Target classifier head "
+            "is reinitialized."
+        )
+
+    load_result = (
+        model.load_state_dict(
+            source_state,
+            strict=False,
+        )
     )
 
-    print("Source checkpoint load result:")
-    print(load_result)
+    print(
+        "Source checkpoint load result:"
+    )
 
-    # -------------------------
-    # Choose what is trainable
-    # -------------------------
+    print(
+        load_result
+    )
+
+    # ========================================================
+    # Choose trainable parameters
+    # ========================================================
+
     if tune_mode == "adapter":
+        # Official LogFormer behavior:
+        # freeze base model, train adapters + norms + classifier.
         model.train_adapter()
 
     elif tune_mode == "classifier":
         model.train_classifier()
 
     elif tune_mode == "tuning":
-        for param in model.parameters():
+        for param in (
+            model.parameters()
+        ):
             param.requires_grad = True
 
     else:
         raise ValueError(
-            "tune_mode must be adapter, classifier, or tuning"
+            "tune_mode must be: "
+            "adapter, classifier, or tuning"
         )
 
-    model = model.to(device)
+    model = model.to(
+        device
+    )
 
-    if torch.cuda.device_count() > 1:
-        print("Using", torch.cuda.device_count(), "GPUs")
-        model = nn.DataParallel(model)
+    if (
+        torch.cuda.device_count()
+        > 1
+    ):
+        print(
+            "Using",
+            torch.cuda.device_count(),
+            "GPUs",
+        )
+
+        model = nn.DataParallel(
+            model
+        )
 
     trainable_params = [
-        p for p in model.parameters()
+        p
+        for p in model.parameters()
         if p.requires_grad
     ]
 
     if not trainable_params:
         raise ValueError(
-            "No trainable parameters. Check Model.train_adapter() "
-            "or tune_mode."
+            "No trainable parameters."
         )
 
     total_params = sum(
-        p.numel() for p in model.parameters()
+        p.numel()
+        for p in model.parameters()
     )
+
     trainable_count = sum(
-        p.numel() for p in trainable_params
+        p.numel()
+        for p in trainable_params
     )
 
     print(
-        f"Trainable parameters: {trainable_count}/{total_params} "
-        f"({100.0 * trainable_count / total_params:.2f}%)"
+        "Trainable parameters:",
+        f"{trainable_count}/{total_params}",
+        f"({100.0 * trainable_count / total_params:.2f}%)",
     )
 
     optimizer = optim.Adam(
@@ -562,50 +976,108 @@ def main():
         lr=lr,
     )
 
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=lr,
-        epochs=epochs,
-        steps_per_epoch=len(train_loader),
+    scheduler = (
+        optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=lr,
+            epochs=epochs,
+            steps_per_epoch=len(
+                train_loader
+            ),
+        )
     )
 
     criterion = nn.BCEWithLogitsLoss()
 
-    # -------------------------
-    # Target tuning
-    # -------------------------
+    # ========================================================
+    # Tune target
+    # ========================================================
+
     best_val_f1 = -1.0
+
     total_start = time.time()
 
-    with open(result_file, "w", encoding="utf-8") as f:
-        f.write("SUPERVISED CROSS-DOMAIN TARGET TUNING\n")
-        f.write(f"source={source_name}\n")
-        f.write(f"target={target_name}\n")
-        f.write(f"target_fraction={target_fraction}\n")
-        f.write("target_classes=normal+anomaly\n")
-        f.write(f"tune_mode={tune_mode}\n")
-        f.write(f"window_size={window_size}\n")
-        f.write(f"epochs={epochs}\n")
-        f.write(f"lr={lr}\n")
-        f.write(f"selected_target_train={len(y_train)}\n\n")
+    with open(
+        result_file,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        f.write(
+            "MULTI-SOURCE -> TARGET "
+            "SUPERVISED LOGFORMER\n"
+        )
+        f.write(
+            f"sources={source_names}\n"
+        )
+        f.write(
+            f"source_tag={source_tag}\n"
+        )
+        f.write(
+            f"target={target_name}\n"
+        )
+        f.write(
+            f"target_fraction="
+            f"{target_fraction}\n"
+        )
+        f.write(
+            "target_classes="
+            "normal+anomaly\n"
+        )
+        f.write(
+            f"window_size="
+            f"{window_size}\n"
+        )
+        f.write(
+            f"tune_mode={tune_mode}\n"
+        )
+        f.write(
+            f"epochs={epochs}\n"
+        )
+        f.write(
+            f"lr={lr}\n"
+        )
+        f.write(
+            f"selected_target_train="
+            f"{len(y_train)}\n"
+        )
+        f.write(
+            f"source_checkpoint="
+            f"{source_checkpoint}\n\n"
+        )
 
     for epoch in range(epochs):
         model.train()
+
         losses = []
 
         for x, y in tqdm(
             train_loader,
-            desc=f"Target epoch {epoch + 1}/{epochs}",
+            desc=(
+                f"Target epoch "
+                f"{epoch + 1}/{epochs}"
+            ),
         ):
-            x = x.to(device).to(torch.float32)
-            y = y.to(device).to(torch.float32)
+            x = (
+                x.to(device)
+                .to(torch.float32)
+            )
+
+            y = (
+                y.to(device)
+                .to(torch.float32)
+            )
 
             optimizer.zero_grad()
 
             out = model(x)
-            loss = criterion(out, y)
+
+            loss = criterion(
+                out,
+                y,
+            )
 
             loss.backward()
+
             nn.utils.clip_grad_norm_(
                 trainable_params,
                 0.5,
@@ -614,12 +1086,16 @@ def main():
             optimizer.step()
             scheduler.step()
 
-            losses.append(loss.item())
+            losses.append(
+                loss.item()
+            )
 
-        train_loss = float(np.mean(losses))
+        train_loss = float(
+            np.mean(losses)
+        )
 
-        # Validation decides best checkpoint.
-        val_p, val_r, val_f1, val_cm, _ = evaluate(
+        # TARGET validation controls checkpoint selection.
+        val_result = evaluate(
             model,
             val_loader,
             device,
@@ -628,54 +1104,96 @@ def main():
         print(
             f"Epoch {epoch + 1}: "
             f"loss={train_loss:.6f}, "
-            f"Val P={val_p:.4f}, "
-            f"Val R={val_r:.4f}, "
-            f"Val F1={val_f1:.4f}"
+            f"Val P="
+            f"{val_result['precision']:.4f}, "
+            f"Val R="
+            f"{val_result['recall']:.4f}, "
+            f"Val F1="
+            f"{val_result['f1']:.4f}"
         )
 
-        with open(result_file, "a", encoding="utf-8") as f:
+        with open(
+            result_file,
+            "a",
+            encoding="utf-8",
+        ) as f:
             f.write(
                 f"Epoch {epoch + 1}: "
                 f"loss={train_loss:.6f}, "
-                f"val_precision={val_p:.6f}, "
-                f"val_recall={val_r:.6f}, "
-                f"val_f1={val_f1:.6f}\n"
+                f"val_precision="
+                f"{val_result['precision']:.6f}, "
+                f"val_recall="
+                f"{val_result['recall']:.6f}, "
+                f"val_f1="
+                f"{val_result['f1']:.6f}\n"
             )
 
-        target_checkpoint = {
-            "net": get_model_state(model),
-            "optimizer": optimizer.state_dict(),
+        checkpoint = {
+            "net": get_model_state(
+                model
+            ),
+            "optimizer": (
+                optimizer.state_dict()
+            ),
             "epoch": epoch,
-            "val_f1": val_f1,
-            "source_dataset": source_name,
-            "target_dataset": target_name,
-            "target_fraction": target_fraction,
-            "target_classes": "normal+anomaly",
-            "window_size": window_size,
+            "val_f1": (
+                val_result["f1"]
+            ),
+            "source_datasets": (
+                source_names
+            ),
+            "source_tag": source_tag,
+            "target_dataset": (
+                target_name
+            ),
+            "target_fraction": (
+                target_fraction
+            ),
+            "target_classes": (
+                "normal+anomaly"
+            ),
+            "window_size": (
+                window_size
+            ),
         }
 
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
+        if (
+            val_result["f1"]
+            > best_val_f1
+        ):
+            best_val_f1 = (
+                val_result["f1"]
+            )
+
             torch.save(
-                target_checkpoint,
+                checkpoint,
                 best_path,
             )
-            print("Saved best target checkpoint:", best_path)
+
+            print(
+                "Saved best target "
+                "checkpoint:",
+                best_path,
+            )
 
         torch.save(
-            target_checkpoint,
+            checkpoint,
             latest_path,
         )
 
-    # -------------------------
-    # Final HDFS test ONCE
-    # -------------------------
+    # ========================================================
+    # FINAL TARGET TEST ONCE
+    # ========================================================
+
     best_checkpoint = torch.load(
         best_path,
         map_location=device,
     )
 
-    if isinstance(model, nn.DataParallel):
+    if isinstance(
+        model,
+        nn.DataParallel,
+    ):
         model.module.load_state_dict(
             best_checkpoint["net"]
         )
@@ -684,39 +1202,97 @@ def main():
             best_checkpoint["net"]
         )
 
-    test_p, test_r, test_f1, test_cm, test_time = evaluate(
+    test_result = evaluate(
         model,
         test_loader,
         device,
     )
 
-    total_time = time.time() - total_start
+    total_time = (
+        time.time()
+        - total_start
+    )
 
     print("\n============================================================")
     print("FINAL TARGET TEST")
     print("============================================================")
-    print("Source:", source_name)
+    print("Sources:", source_names)
     print("Target:", target_name)
-    print(f"Target supervised fraction: {target_fraction * 100:.2f}%")
-    print(f"Number of testing data: {len(y_test)}")
-    print(f"Precision: {test_p:.4f}")
-    print(f"Recall:    {test_r:.4f}")
-    print(f"F1 score:  {test_f1:.4f}")
-    print("Confusion matrix:")
-    print(test_cm)
-    print("Best checkpoint:", best_path)
+    print(
+        "Supervised target fraction:",
+        f"{target_fraction * 100:.2f}%",
+    )
+    print(
+        "Number of testing data:",
+        len(y_test),
+    )
+    print(
+        f"Precision: "
+        f"{test_result['precision']:.4f}"
+    )
+    print(
+        f"Recall:    "
+        f"{test_result['recall']:.4f}"
+    )
+    print(
+        f"F1 score:  "
+        f"{test_result['f1']:.4f}"
+    )
+    print(
+        "Confusion matrix:"
+    )
+    print(
+        test_result[
+            "confusion_matrix"
+        ]
+    )
+    print(
+        "Best target checkpoint:",
+        best_path,
+    )
     print("============================================================")
 
-    with open(result_file, "a", encoding="utf-8") as f:
-        f.write("\nFINAL TARGET TEST\n")
-        f.write(f"number_testing_data={len(y_test)}\n")
-        f.write(f"precision={test_p}\n")
-        f.write(f"recall={test_r}\n")
-        f.write(f"f1={test_f1}\n")
-        f.write(f"confusion_matrix=\n{test_cm}\n")
-        f.write(f"prediction_time={test_time}\n")
-        f.write(f"total_time={total_time}\n")
-        f.write(f"best_checkpoint={best_path}\n")
+    with open(
+        result_file,
+        "a",
+        encoding="utf-8",
+    ) as f:
+        f.write(
+            "\nFINAL TARGET TEST\n"
+        )
+        f.write(
+            f"number_testing_data="
+            f"{len(y_test)}\n"
+        )
+        f.write(
+            f"precision="
+            f"{test_result['precision']}\n"
+        )
+        f.write(
+            f"recall="
+            f"{test_result['recall']}\n"
+        )
+        f.write(
+            f"f1="
+            f"{test_result['f1']}\n"
+        )
+        f.write(
+            "confusion_matrix=\n"
+        )
+        f.write(
+            f"{test_result['confusion_matrix']}\n"
+        )
+        f.write(
+            f"prediction_time="
+            f"{test_result['prediction_time']}\n"
+        )
+        f.write(
+            f"total_time={total_time}\n"
+        )
+        f.write(
+            f"best_checkpoint="
+            f"{best_path}\n"
+        )
 
 
 if __name__ == "__main__":

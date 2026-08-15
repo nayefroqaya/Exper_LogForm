@@ -1,80 +1,96 @@
 # ============================================================
-# LogFormer Supervised Cross-Dataset Experiment
+# LogFormer Multi-Source Cross-Dataset Configuration
+# ============================================================
 #
-# Source : BGL
-# Target : HDFS
+# Supports:
+#   - 1, 2, or 3 SOURCE datasets
+#   - exactly 1 TARGET dataset
 #
-# Pipeline:
+# Current example:
+#   Sources = BGL + HDFS
+#   Target  = TH_1G
 #
-# 1. Preprocess BGL and HDFS independently
+# Source pretraining:
+#   FULL source training sets
+#   normal + anomaly
 #
-# 2. Pre-train LogFormer on:
-#       BGL TRAIN
-#       Normal + Anomaly
+# Target adaptation:
+#   target_train_fraction = 0.20
+#   -> 20% target NORMAL train blocks
+#   +  20% target ANOMALY train blocks
 #
-# 3. Select best source checkpoint using:
-#       BGL VALIDATION
+# This keeps LogFormer supervised.
 #
-# 4. Load BGL checkpoint and adapt on:
-#       20% HDFS TRAIN
-#       Normal + Anomaly
-#
-# 5. Select best target checkpoint using:
-#       HDFS VALIDATION
-#
-# 6. Final evaluation:
-#       HDFS TEST
-#
-# IMPORTANT:
-# BGL and HDFS are NOT concatenated.
-# HDFS fraction is NOT selected during preprocessing.
-# The fraction is selected inside tune_transformer.
+# Window size = 120 for your controlled/fair comparison.
 # ============================================================
 
 
 # ============================================================
-# Experiment
+# Experiment selection
 # ============================================================
 
 setting: cross_dataset
 
-# Source
+# ------------------------------------------------------------
+# Choose 1, 2, or 3 source datasets.
+#
+# ONE SOURCE example:
+#
+# source_dataset_names:
+#   - BGL
+#
+# TWO SOURCE example:
+#
+# source_dataset_names:
+#   - BGL
+#   - HDFS
+#
+# THREE SOURCE example:
+#
+# source_dataset_names:
+#   - BGL
+#   - HDFS
+#   - SP_150MB_ratio
+#
+# ------------------------------------------------------------
+
 source_dataset_names:
   - BGL
+  - HDFS
 
-# Target
+
+# Exactly ONE target.
+# Target must NOT also appear in source_dataset_names.
+
 target_dataset_name: TH_1G
 
 
-# Optional new-name aliases.
-# The scripts support either these keys or the above keys.
-# You can leave them commented.
-#
-# source_log_name: BGL
-# target_log_name: HDFS
-
-
 # ============================================================
-# Sequence / window
+# Window / sequence
 # ============================================================
 
-# For LogFormer reproduction use 20.
+# Your comparison setting
 window_size: 120
 
-# Existing grouping column in your PKL files.
+# Existing block/group column
 block_col: Node_block_id
 
 seed: 123
 
 
 # ============================================================
-# Preprocessed output
+# Output directories
 # ============================================================
 
+# Preprocessor writes NPZ files here
 output_dir: preprocess/preprocessed_data
 
-# train/tune scripts read this key.
+# Train/tune read NPZ files here
 preprocessed_dir: preprocess/preprocessed_data
+
+result_dir: result
+
+checkpoint_dir: checkpoints
 
 
 # ============================================================
@@ -85,51 +101,46 @@ embedding_model: distilbert-base-nli-mean-tokens
 
 embed_batch_size: 128
 
-# null = automatically use GPU when available
+# null = automatically use CUDA if available
 device: null
 
 
 # ============================================================
-# Target supervised adaptation
+# SUPERVISED target adaptation
 # ============================================================
 
 # IMPORTANT:
 #
 # 0.20 means:
 #
-#   20% of NORMAL HDFS training blocks
-#             +
-#   20% of ANOMALOUS HDFS training blocks
+#   20% of target NORMAL training blocks
+#                +
+#   20% of target ANOMALOUS training blocks
 #
-# It is NOT normal-only anymore.
+# It does NOT mean normal-only.
 #
-# This keeps approximately the same class ratio as the complete
-# HDFS target training set.
+# Examples:
+#   0.0125 = 1.25%
+#   0.025  = 2.5%
+#   0.05   = 5%
+#   0.10   = 10%
+#   0.20   = 20%
+#   1.00   = 100%
 #
-# Other examples:
-#
-# 0.0125 = 1.25%
-# 0.025  = 2.5%
-# 0.05   = 5%
-# 0.10   = 10%
-# 0.20   = 20%
-# 1.00   = 100%
-
 target_train_fraction: 0.20
 
 target_sampling_seed: 123
 
 
 # ============================================================
-# Dataset paths and sequence construction
+# Dataset registry
 # ============================================================
 
 datasets:
 
   # ----------------------------------------------------------
-  # BGL = SOURCE
+  # BGL
   # ----------------------------------------------------------
-
   BGL:
 
     train_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/train_df.pkl
@@ -138,31 +149,22 @@ datasets:
 
     test_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/test_df.pkl
 
-
-    # Reconstruct BGL sequences according to row order.
+    # Recreate non-overlapping windows from chronological row order.
     #
-    # With window_size: 20:
-    #
-    # logs 1-20   = sequence 1
-    # logs 21-40  = sequence 2
-    # logs 41-60  = sequence 3
-    #
-    # No overlap.
+    # window_size=120:
+    # rows 0-119    -> sequence 0
+    # rows 120-239  -> sequence 1
+    # ...
     sequence_mode: fixed_nonoverlap_rows
 
-    # fixed_nonoverlap_rows automatically produces
-    # exactly window_size rows per sequence.
     block_length_mode: exact
 
-
-    # Not needed when fixed_nonoverlap_rows is used.
     strict_split_overlap_check: false
 
 
   # ----------------------------------------------------------
-  # HDFS = TARGET
+  # HDFS
   # ----------------------------------------------------------
-
   HDFS:
 
     train_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/train_df.pkl
@@ -171,27 +173,21 @@ datasets:
 
     test_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
 
-
-    # HDFS sequences are already naturally defined by BlockId /
-    # Node_block_id.
+    # HDFS is naturally grouped by BlockId / Node_block_id.
     sequence_mode: existing_blocks
 
-    # HDFS blocks can have different numbers of log messages.
-    # Keep complete blocks here.
-    # DataGenerator will pad/truncate them to window_size.
+    # Keep full variable-length HDFS block.
+    # LogFormer's DataGenerator pads/truncates each block to 120.
     block_length_mode: keep_variable
 
-
-    # Very important:
-    # make sure the same original HDFS BlockId does not appear
-    # in train/validation/test.
+    # Important for HDFS:
+    # stop if the same BlockId is in more than one split.
     strict_split_overlap_check: true
 
 
   # ----------------------------------------------------------
-  # Other datasets can remain registered for later experiments
+  # Thunderbird 1G
   # ----------------------------------------------------------
-
   TH_1G:
 
     train_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
@@ -200,7 +196,18 @@ datasets:
 
     test_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
 
+    # Your PKLs already contain Node_block_id.
+    sequence_mode: existing_blocks
 
+    # If every Node_block_id has exactly 120 rows, use exact.
+    block_length_mode: exact
+
+    strict_split_overlap_check: false
+
+
+  # ----------------------------------------------------------
+  # Spirit
+  # ----------------------------------------------------------
   SP_150MB_ratio:
 
     train_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/train_df.pkl
@@ -209,9 +216,16 @@ datasets:
 
     test_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/test_df.pkl
 
+    sequence_mode: existing_blocks
+
+    # If every Node_block_id has exactly 120 rows, use exact.
+    block_length_mode: exact
+
+    strict_split_overlap_check: false
+
 
 # ============================================================
-# Model architecture
+# LogFormer model
 # ============================================================
 
 embedding_dim: 768
@@ -229,8 +243,10 @@ feedforward_multiplier: 4
 
 # ============================================================
 # SOURCE PRETRAINING
-# BGL
 # ============================================================
+
+# classifier here means the standard source architecture.
+# The whole source model is optimized during source pretraining.
 
 source_mode: classifier
 
@@ -242,11 +258,11 @@ source_lr: 0.00001
 
 
 # ============================================================
-# TARGET ADAPTATION
-# HDFS
+# TARGET TUNING
 # ============================================================
 
-# LogFormer adapter tuning
+# adapter = LogFormer adapter tuning
+
 tune_mode: adapter
 
 target_batch_size: 64
@@ -256,35 +272,45 @@ target_epochs: 20
 target_lr: 0.00001
 
 
-# Start a new classifier head for the target domain,
-# following the behavior of your previous tuning script.
+# Original LogFormer tuning removes source fc1 weights
+# and learns a new target classifier head.
+
 reinitialize_classifier: true
 
 
 # ============================================================
-# Results
+# OPTIONAL checkpoint overrides
 # ============================================================
-
-result_dir: result
-
-
-# ============================================================
-# Checkpoints
-# ============================================================
-
-checkpoint_dir: checkpoints
-
-
-# BGL source checkpoint created by train_transformer.
 #
-# IMPORTANT:
-# tune_transformer will load exactly this file.
-source_best_checkpoint: checkpoints/train_BGL_classifier_1_64_1e-05-best.pt
-
-source_latest_checkpoint: checkpoints/train_BGL_classifier_1_64_1e-05-latest.pt
-
-
-# TH_1G target checkpoints created by tune_transformer.
-target_best_checkpoint: checkpoints/tune_TH_1G_from_BGL_adapter_best.pt
-
-target_latest_checkpoint: checkpoints/tune_TH_1G_from_BGL_adapter_latest.pt
+# Normally LEAVE THESE COMMENTED.
+#
+# The scripts automatically create names based on the selected
+# source datasets.
+#
+# Examples:
+#
+# source_dataset_names:
+#   - BGL
+# gives:
+# checkpoints/train_BGL_classifier_1_64_1e-05-best.pt
+#
+# source_dataset_names:
+#   - BGL
+#   - HDFS
+# gives:
+# checkpoints/train_BGL_HDFS_classifier_1_64_1e-05-best.pt
+#
+# source_dataset_names:
+#   - BGL
+#   - HDFS
+#   - SP_150MB_ratio
+# gives:
+# checkpoints/train_BGL_HDFS_SP_150MB_ratio_classifier_1_64_1e-05-best.pt
+#
+# You only need an explicit override if you want a custom name.
+#
+# source_best_checkpoint: checkpoints/custom_source_best.pt
+# source_latest_checkpoint: checkpoints/custom_source_latest.pt
+#
+# target_best_checkpoint: checkpoints/custom_target_best.pt
+# target_latest_checkpoint: checkpoints/custom_target_latest.pt
