@@ -1,260 +1,426 @@
+#!/usr/bin/env python3
+"""
+Source-domain pretraining for supervised cross-domain LogFormer.
+
+For BGL -> HDFS:
+    - trains ONLY on BGL training
+    - selects the best source checkpoint using BGL validation
+    - evaluates BGL test only once after training
+    - does NOT use any HDFS data
+"""
+
 import argparse
-import time
 import os
 import random
+import time
 import warnings
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import precision_recall_fscore_support, f1_score
+import yaml
+from sklearn.metrics import (
+    confusion_matrix,
+    precision_recall_fscore_support,
+)
 from tqdm import tqdm
 
 from dataloader import DataGenerator
 from model import Model
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--log_name', type=str,
-                    default='BGL', help='log file name')
-parser.add_argument('--window_size', type=int,
-                    default='120', help='log sequence length')
-parser.add_argument('--mode', type=str, default='classifier',
-                    help='use adapter or not')
-parser.add_argument('--num_layers', type=int, default=1,
-                    help='num of encoder layer')
-parser.add_argument('--adapter_size', type=int, default=64,
-                    help='adapter size')
-parser.add_argument('--lr', type=float, default=0.00001)
-parser.add_argument("--resume", type=int, default=0,
-                    help="resume training of model (0/no, 1/yes)")
-parser.add_argument("--load_path", type=str,
-                    default='checkpoints/model-latest.pt', help="latest model path")
-parser.add_argument('--preprocessed_dir', type=str, default='preprocess/preprocessed_data',
-                    help='directory containing BGL_training_block_w*.npz and BGL_testing_block_w*.npz')
-args = parser.parse_args()
-suffix = f'{args.log_name}_{args.mode}_{args.num_layers}_{args.adapter_size}_{args.lr}'
-os.makedirs('result', exist_ok=True)
-os.makedirs('checkpoints', exist_ok=True)
-with open(f'result/train_{suffix}.txt', 'a', encoding='utf-8') as f:
-    f.write(str(args)+'\n')
 
-# hyper-parameters
-EMBEDDING_DIM = 768
-batch_size = 64
-epochs = 5
-lr = args.lr
-# =========================
-# Device setup
-# =========================
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+# ============================================================
+# Helpers
+# ============================================================
+
+def load_config(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
-# fix all random seeds
-warnings.filterwarnings('ignore')
-torch.manual_seed(123)
-torch.cuda.manual_seed(123)
-np.random.seed(123)
-random.seed(123)
-torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = True
+def get_source_name(cfg):
+    if cfg.get("source_log_name"):
+        return str(cfg["source_log_name"])
 
-# load data Hdfs
-# =========================
-# Load preprocessed data
-# =========================
-train_path = os.path.join(args.preprocessed_dir, f'{args.log_name}_training_block_w{args.window_size}.npz')
-test_path = os.path.join(args.preprocessed_dir, f'{args.log_name}_testing_block_w{args.window_size}.npz')
-train_data = np.load(train_path, allow_pickle=True)
-test_data = np.load(test_path, allow_pickle=True)
+    names = cfg.get("source_dataset_names")
+    if isinstance(names, list) and len(names) == 1:
+        return str(names[0])
 
-
-x_train, y_train = train_data['x'], train_data['y']
-x_test, y_test = test_data['x'], test_data['y']
-del train_data
-del test_data
-
-print(f"Loaded train x shape: {x_train.shape}, y shape: {y_train.shape}")
-print(f"Loaded test  x shape: {x_test.shape}, y shape: {y_test.shape}")
-
-if len(x_train) == 0:
     raise ValueError(
-        f"Training NPZ is empty: {train_path}. "
-        "Rerun preprocessing with block_length_mode: keep_variable or pad_truncate."
+        "Specify source_log_name: BGL or source_dataset_names: [BGL]"
     )
 
-if len(x_test) == 0:
-    raise ValueError(
-        f"Testing NPZ is empty: {test_path}. "
-        "Rerun preprocessing with block_length_mode: keep_variable or pad_truncate."
+
+def get_preprocessed_dir(cfg):
+    return str(
+        cfg.get(
+            "preprocessed_dir",
+            cfg.get("output_dir", "preprocess/preprocessed_data"),
+        )
     )
 
-train_generator = DataGenerator(x_train, y_train, args.window_size)
-test_generator = DataGenerator(x_test, y_test, args.window_size)
-train_loader = torch.utils.data.DataLoader(
-    train_generator, batch_size=batch_size, shuffle=True)
-test_loader = torch.utils.data.DataLoader(
-    test_generator, batch_size=batch_size, shuffle=False)
+
+def get_model_state(model):
+    if isinstance(model, nn.DataParallel):
+        return model.module.state_dict()
+    return model.state_dict()
 
 
-
-# automatically choose GPU if available, else CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
-
-# if multiple GPUs, get all device IDs
-if torch.cuda.device_count() > 1:
-    device_ids = list(range(torch.cuda.device_count()))
-    print("Using multiple GPUs:", device_ids)
-else:
-    device_ids = None
-
-
-model = Model(
-    mode=args.mode,
-    num_layers=args.num_layers,
-    adapter_size=args.adapter_size,
-    dim=EMBEDDING_DIM,
-    window_size=args.window_size,
-    nhead=8,
-    dim_feedforward=4*EMBEDDING_DIM,
-    dropout=0.1
-)
-
-# move to device
-model = model.to(device)
-
-# wrap with DataParallel **only if multiple GPUs are available**
-if device_ids and len(device_ids) > 1:
-    model = torch.nn.DataParallel(model, device_ids=device_ids)
-
-optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=0)
-# scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-#     optimizer, mode='min', factor=0.7, patience=4, threshold=1e-4, verbose=True)
-scheduler = optim.lr_scheduler.OneCycleLR(
-    optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=len(train_loader))
-criterion = nn.BCEWithLogitsLoss()
-
-start_epoch = -1
-if args.resume == 1:
-    path_checkpoint = args.load_path
-    checkpoint = torch.load(path_checkpoint)
-    model.load_state_dict(checkpoint['net'])
-    optimizer.load_state_dict(checkpoint['optimizer'])
-    start_epoch = checkpoint['epoch']
-    print("resume training from epoch ", start_epoch)
-
-
-best_f1 = 0
-log_interval = 100
-total_training_start_time = time.time()
-for epoch in range(start_epoch+1, epochs):
-    loss_all, f1_all = [], []
-    train_loss = 0
-    train_pred, train_true = [], []
-
-    model.train()
-    start_time = time.time()
-    for batch_idx, data in enumerate(tqdm(train_loader)):
-        x, y = data[0].to(device), data[1].to(device)
-        x = x.to(torch.float32)
-        y = y.to(torch.float32)
-        out = model(x)
-        loss = criterion(out, y)
-
-        optimizer.zero_grad()
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optimizer.step()
-        scheduler.step()
-
-        train_loss += loss.item()
-        train_pred.extend(out.argmax(1).tolist())
-        train_true.extend(y.argmax(1).tolist())
-
-        if batch_idx % log_interval == 0 and batch_idx > 0:
-            cur_loss = train_loss / log_interval
-            # scheduler.step(cur_loss)
-            cur_f1 = f1_score(train_true, train_pred)
-            time_cost = time.time()-start_time
-
-            with open(f'result/train_{suffix}.txt', 'a', encoding='utf-8') as f:
-                f.write(f'| epoch {epoch:3d} | {batch_idx:5d}/{len(train_loader):5d} batches | '
-                        f'loss {cur_loss:2.5f} |'
-                        f'f1 {cur_f1:.5f} |'
-                        f'time {time_cost:4.2f} |'
-                        f'lr {scheduler.get_last_lr()}\n')
-            print(f'| epoch {epoch:3d} | {batch_idx:5d}/{len(train_loader):5d} batches | '
-                  f'loss {cur_loss} |'
-                  f'f1 {cur_f1}',
-                  f'lr {scheduler.get_last_lr()}')
-
-            loss_all.append(train_loss)
-            f1_all.append(cur_f1)
-
-            start_time = time.time()
-            train_loss = 0
-            train_acc = 0
-
-    train_loss = float(np.mean(loss_all)) if loss_all else train_loss / max(1, len(train_loader))
-    print("epoch : {}/{}, loss = {:.6f}".format(epoch, epochs, train_loss))
-
+def evaluate(model, loader, device):
     model.eval()
-    y_pred_list, y_true_list = [], []
-    test_start_time = time.time()
+
+    pred_all = []
+    true_all = []
+
+    start = time.time()
 
     with torch.no_grad():
-        for batch_idx, data in enumerate(tqdm(test_loader)):
-            x, y = data[0].to(device), data[1].to(device)
-            x = x.to(torch.float32)
-            y = y.to(torch.float32)
-            out = model(x).cpu()
-            y_pred_list.append(out)
-            y_true_list.append(y.cpu())
+        for x, y in tqdm(loader, desc="Evaluation"):
+            x = x.to(device).to(torch.float32)
+            y = y.to(device).to(torch.float32)
 
-    test_prediction_time = time.time() - test_start_time
+            out = model(x)
 
-    if len(y_pred_list) == 0:
-        raise ValueError(
-            "test_loader is empty. The testing NPZ has zero samples. "
-            "Rerun preprocessing with block_length_mode: keep_variable or pad_truncate."
+            pred_all.append(out.cpu())
+            true_all.append(y.cpu())
+
+    if not pred_all:
+        raise ValueError("Evaluation loader is empty.")
+
+    prediction_time = time.time() - start
+
+    pred = torch.cat(pred_all, dim=0).numpy()
+    true = torch.cat(true_all, dim=0).numpy()
+
+    pred_labels = np.argmax(pred, axis=1)
+    true_labels = np.argmax(true, axis=1)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        true_labels,
+        pred_labels,
+        average="binary",
+        zero_division=0,
+    )
+
+    cm = confusion_matrix(true_labels, pred_labels)
+
+    return precision, recall, f1, cm, prediction_time
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default="config_cross_dataset_last.yml",
+    )
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+
+    # -------------------------
+    # Experiment configuration
+    # -------------------------
+    source_name = get_source_name(cfg)
+    preprocessed_dir = get_preprocessed_dir(cfg)
+
+    window_size = int(cfg.get("window_size", 120))
+    seed = int(cfg.get("seed", 123))
+
+    embedding_dim = int(cfg.get("embedding_dim", 768))
+    num_layers = int(cfg.get("num_layers", 1))
+    adapter_size = int(cfg.get("adapter_size", 64))
+    nhead = int(cfg.get("nhead", 8))
+    dropout = float(cfg.get("dropout", 0.1))
+    feedforward_multiplier = int(cfg.get("feedforward_multiplier", 4))
+
+    mode = str(cfg.get("source_mode", "classifier"))
+    batch_size = int(cfg.get("source_batch_size", 64))
+    epochs = int(cfg.get("source_epochs", 5))
+    lr = float(cfg.get("source_lr", 1e-5))
+
+    result_dir = str(cfg.get("result_dir", "result"))
+    checkpoint_dir = str(cfg.get("checkpoint_dir", "checkpoints"))
+
+    os.makedirs(result_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    suffix = (
+        f"{source_name}_{mode}_{num_layers}_{adapter_size}_{lr}"
+    )
+
+    result_file = os.path.join(
+        result_dir,
+        f"train_{suffix}.txt",
+    )
+
+    best_path = cfg.get(
+        "source_best_checkpoint",
+        os.path.join(checkpoint_dir, f"train_{suffix}-best.pt"),
+    )
+
+    latest_path = cfg.get(
+        "source_latest_checkpoint",
+        os.path.join(checkpoint_dir, f"train_{suffix}-latest.pt"),
+    )
+
+    Path(best_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(latest_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # -------------------------
+    # Reproducibility
+    # -------------------------
+    warnings.filterwarnings("ignore")
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    print("Using device:", device)
+
+    # -------------------------
+    # Load SOURCE only
+    # -------------------------
+    train_path = os.path.join(
+        preprocessed_dir,
+        f"{source_name}_training_block_w{window_size}.npz",
+    )
+    val_path = os.path.join(
+        preprocessed_dir,
+        f"{source_name}_validation_block_w{window_size}.npz",
+    )
+    test_path = os.path.join(
+        preprocessed_dir,
+        f"{source_name}_testing_block_w{window_size}.npz",
+    )
+
+    train_npz = np.load(train_path, allow_pickle=True)
+    val_npz = np.load(val_path, allow_pickle=True)
+    test_npz = np.load(test_path, allow_pickle=True)
+
+    x_train, y_train = train_npz["x"], train_npz["y"]
+    x_val, y_val = val_npz["x"], val_npz["y"]
+    x_test, y_test = test_npz["x"], test_npz["y"]
+
+    del train_npz, val_npz, test_npz
+
+    if len(x_train) == 0 or len(x_val) == 0 or len(x_test) == 0:
+        raise ValueError("Source train/validation/test NPZ must all be non-empty.")
+
+    def print_distribution(name, y):
+        labels = np.argmax(y, axis=1)
+        print(
+            f"{name}: total={len(y)}, "
+            f"normal={int(np.sum(labels == 0))}, "
+            f"anomaly={int(np.sum(labels == 1))}"
         )
 
-    # calculate metrics
-    y_pred = torch.cat(y_pred_list, dim=0).numpy()
-    y_true = torch.cat(y_true_list, dim=0).numpy()
-    y_true = np.argmax(y_true, axis=1)
-    y_pred = np.argmax(y_pred, axis=1)
-    report = precision_recall_fscore_support(y_true, y_pred, average='binary')
-    with open(f'result/train_{suffix}.txt', 'a', encoding='utf-8') as f:
-        f.write('number of epochs:'+str(epoch)+'\n')
-        f.write('Number of testing data:'+str(x_test.shape[0])+'\n')
-        f.write('Precision:'+str(report[0])+'\n')
-        f.write('Recall:'+str(report[1])+'\n')
-        f.write('F1 score:'+str(report[2])+'\n')
-        f.write('Training time so far:'+str(time.time() - total_training_start_time)+'\n')
-        f.write('Test prediction time:'+str(test_prediction_time)+'\n')
-        f.write('all_loss:'+str(loss_all)+'\n')
-        f.write('\n')
-        f.close()
+    print("\n============================================================")
+    print("SOURCE PRETRAINING")
+    print("============================================================")
+    print("Source:", source_name)
+    print("Target data used here: NONE")
+    print_distribution("Source train", y_train)
+    print_distribution("Source validation", y_val)
+    print_distribution("Source test", y_test)
+    print("============================================================")
 
-    print(f'Number of testing data: {x_test.shape[0]}')
-    print(f'Precision: {report[0]:.4f}')
-    print(f'Recall: {report[1]:.4f}')
-    print(f'F1 score: {report[2]:.4f}')
-    print(f'Training time so far: {time.time() - total_training_start_time:.4f}s')
-    print(f'Test prediction time: {test_prediction_time:.4f}s')
+    # -------------------------
+    # Data loaders
+    # -------------------------
+    train_loader = torch.utils.data.DataLoader(
+        DataGenerator(x_train, y_train, window_size),
+        batch_size=batch_size,
+        shuffle=True,
+    )
 
-    ckpt_path = 'checkpoints/'
-    checkpoint = {
-        "net": model.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        "epoch": epoch
-    }
-    if report[2] > best_f1:
-        best_f1 = report[2]
-        torch.save(checkpoint, os.path.join(
-            ckpt_path, f'train_{suffix}-best.pt'))
-    torch.save(checkpoint, os.path.join(
-        ckpt_path, f'train_{suffix}-latest.pt'))
+    val_loader = torch.utils.data.DataLoader(
+        DataGenerator(x_val, y_val, window_size),
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
+    test_loader = torch.utils.data.DataLoader(
+        DataGenerator(x_test, y_test, window_size),
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
+    # -------------------------
+    # Model
+    # -------------------------
+    model = Model(
+        mode=mode,
+        num_layers=num_layers,
+        adapter_size=adapter_size,
+        dim=embedding_dim,
+        window_size=window_size,
+        nhead=nhead,
+        dim_feedforward=feedforward_multiplier * embedding_dim,
+        dropout=dropout,
+    )
+
+    model = model.to(device)
+
+    if torch.cuda.device_count() > 1:
+        print("Using", torch.cuda.device_count(), "GPUs")
+        model = nn.DataParallel(model)
+
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=lr,
+        weight_decay=0,
+    )
+
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr,
+        epochs=epochs,
+        steps_per_epoch=len(train_loader),
+    )
+
+    criterion = nn.BCEWithLogitsLoss()
+
+    # -------------------------
+    # Train source model
+    # -------------------------
+    best_val_f1 = -1.0
+    total_start = time.time()
+
+    with open(result_file, "w", encoding="utf-8") as f:
+        f.write("SOURCE PRETRAINING\n")
+        f.write(f"source={source_name}\n")
+        f.write(f"window_size={window_size}\n")
+        f.write(f"epochs={epochs}\n")
+        f.write(f"lr={lr}\n")
+        f.write(f"batch_size={batch_size}\n\n")
+
+    for epoch in range(epochs):
+        model.train()
+        losses = []
+
+        for x, y in tqdm(
+            train_loader,
+            desc=f"Source epoch {epoch + 1}/{epochs}",
+        ):
+            x = x.to(device).to(torch.float32)
+            y = y.to(device).to(torch.float32)
+
+            optimizer.zero_grad()
+
+            out = model(x)
+            loss = criterion(out, y)
+
+            loss.backward()
+            nn.utils.clip_grad_norm_(
+                model.parameters(),
+                0.5,
+            )
+
+            optimizer.step()
+            scheduler.step()
+
+            losses.append(loss.item())
+
+        train_loss = float(np.mean(losses))
+
+        val_p, val_r, val_f1, val_cm, _ = evaluate(
+            model,
+            val_loader,
+            device,
+        )
+
+        print(
+            f"Epoch {epoch + 1}: "
+            f"loss={train_loss:.6f}, "
+            f"Val P={val_p:.4f}, "
+            f"Val R={val_r:.4f}, "
+            f"Val F1={val_f1:.4f}"
+        )
+
+        with open(result_file, "a", encoding="utf-8") as f:
+            f.write(
+                f"Epoch {epoch + 1}: "
+                f"loss={train_loss:.6f}, "
+                f"val_precision={val_p:.6f}, "
+                f"val_recall={val_r:.6f}, "
+                f"val_f1={val_f1:.6f}\n"
+            )
+
+        checkpoint = {
+            "net": get_model_state(model),
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "val_f1": val_f1,
+            "source_dataset": source_name,
+            "window_size": window_size,
+        }
+
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            torch.save(checkpoint, best_path)
+            print("Saved best source checkpoint:", best_path)
+
+        torch.save(checkpoint, latest_path)
+
+    # -------------------------
+    # Final source test ONCE
+    # -------------------------
+    best_checkpoint = torch.load(
+        best_path,
+        map_location=device,
+    )
+
+    if isinstance(model, nn.DataParallel):
+        model.module.load_state_dict(best_checkpoint["net"])
+    else:
+        model.load_state_dict(best_checkpoint["net"])
+
+    test_p, test_r, test_f1, test_cm, test_time = evaluate(
+        model,
+        test_loader,
+        device,
+    )
+
+    total_time = time.time() - total_start
+
+    print("\n============================================================")
+    print("FINAL SOURCE TEST")
+    print("============================================================")
+    print(f"Precision: {test_p:.4f}")
+    print(f"Recall:    {test_r:.4f}")
+    print(f"F1:        {test_f1:.4f}")
+    print("Confusion matrix:")
+    print(test_cm)
+    print("Best checkpoint:", best_path)
+    print("============================================================")
+
+    with open(result_file, "a", encoding="utf-8") as f:
+        f.write("\nFINAL SOURCE TEST\n")
+        f.write(f"precision={test_p}\n")
+        f.write(f"recall={test_r}\n")
+        f.write(f"f1={test_f1}\n")
+        f.write(f"confusion_matrix=\n{test_cm}\n")
+        f.write(f"prediction_time={test_time}\n")
+        f.write(f"total_time={total_time}\n")
+        f.write(f"best_checkpoint={best_path}\n")
+
+
+if __name__ == "__main__":
+    main()

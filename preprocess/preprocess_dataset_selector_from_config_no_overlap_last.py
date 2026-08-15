@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 """
-Dataset-name based PKL selector + preprocessor for LogFormer.
+Preprocess source and target datasets independently for supervised
+cross-domain LogFormer experiments.
 
-Run:
-    python preprocess_dataset_selector_from_config_no_overlap.py --config config_cross_dataset.yml
+Example:
+    Source = BGL
+    Target = HDFS
 
-In-domain:
-    Uses one dataset's train/val/test PKLs.
+Outputs:
+    BGL_training_block_w{window}.npz
+    BGL_validation_block_w{window}.npz
+    BGL_testing_block_w{window}.npz
 
-Cross-dataset:
-    source train PKLs from one/two/three datasets
-    + fraction of normal target train BLOCKS
-    validation = target val PKL
-    testing = target test PKL
+    HDFS_training_block_w{window}.npz
+    HDFS_validation_block_w{window}.npz
+    HDFS_testing_block_w{window}.npz
 
-Important:
-- Uses Original_Label as Label when Original_Label exists.
-- Samples normal target data by Node_block_id blocks, not rows.
-- In cross_dataset mode, prefixes Node_block_id with dataset/split before concatenation to prevent collisions.
-- Does not delete any rows.
-- Supports block_length_mode: exact, keep_variable, pad_truncate.
+IMPORTANT:
+- Source and target are NOT concatenated.
+- No target fraction is sampled here.
+- The complete target TRAIN split (normal + anomaly) is saved.
+- The target fraction is selected later inside tune_transformer_pkl_ready_last.py.
 """
 
 import argparse
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -39,6 +40,13 @@ except ImportError as exc:
     raise ImportError("Install PyYAML first: pip install pyyaml") from exc
 
 
+SEQUENCE_COL = "__sequence_id__"
+
+
+# ============================================================
+# Configuration helpers
+# ============================================================
+
 def load_config(path: str) -> Dict[str, Any]:
     path_obj = Path(path)
     if not path_obj.exists():
@@ -48,146 +56,348 @@ def load_config(path: str) -> Dict[str, Any]:
         cfg = yaml.safe_load(f) or {}
 
     if not isinstance(cfg, dict):
-        raise ValueError("config.yml must contain a YAML dictionary.")
+        raise ValueError("YAML config must contain a dictionary.")
 
     return cfg
 
 
-def require(cfg: Dict[str, Any], key: str):
-    if key not in cfg or cfg[key] is None:
-        raise ValueError(f"Missing required config key: {key}")
-    return cfg[key]
+def get_source_name(cfg: Dict[str, Any]) -> str:
+    # New key
+    if cfg.get("source_log_name"):
+        return str(cfg["source_log_name"])
+
+    # Compatible with your existing YAML
+    names = cfg.get("source_dataset_names")
+    if isinstance(names, list) and len(names) == 1:
+        return str(names[0])
+
+    if isinstance(names, list) and len(names) > 1:
+        raise ValueError(
+            "This supervised pretrain->tune pipeline expects one source dataset. "
+            f"Found: {names}"
+        )
+
+    raise ValueError(
+        "Specify either source_log_name: BGL or source_dataset_names: [BGL]"
+    )
 
 
-def get_dataset_paths(cfg: Dict[str, Any], dataset_name: str) -> Dict[str, str]:
-    datasets = require(cfg, "datasets")
+def get_target_name(cfg: Dict[str, Any]) -> str:
+    if cfg.get("target_log_name"):
+        return str(cfg["target_log_name"])
+
+    if cfg.get("target_dataset_name"):
+        return str(cfg["target_dataset_name"])
+
+    raise ValueError(
+        "Specify either target_log_name: HDFS or target_dataset_name: HDFS"
+    )
+
+
+def get_output_dir(cfg: Dict[str, Any]) -> str:
+    return str(
+        cfg.get(
+            "preprocessed_dir",
+            cfg.get("output_dir", "preprocess/preprocessed_data"),
+        )
+    )
+
+
+def get_dataset_cfg(cfg: Dict[str, Any], dataset_name: str) -> Dict[str, Any]:
+    datasets = cfg.get("datasets")
+    if not isinstance(datasets, dict):
+        raise ValueError("Missing datasets: section in YAML.")
+
     if dataset_name not in datasets:
-        available = list(datasets.keys())
-        raise ValueError(f"Dataset '{dataset_name}' not found in config datasets. Available: {available}")
+        raise ValueError(
+            f"Dataset '{dataset_name}' not found. Available: {list(datasets.keys())}"
+        )
 
-    ds = datasets[dataset_name]
+    ds_cfg = datasets[dataset_name]
+
     for key in ["train_pkl", "val_pkl", "test_pkl"]:
-        if key not in ds or ds[key] is None:
-            raise ValueError(f"Dataset '{dataset_name}' missing {key}")
+        if key not in ds_cfg or ds_cfg[key] is None:
+            raise ValueError(f"Dataset '{dataset_name}' missing '{key}'.")
 
-    return {
-        "train_pkl": str(ds["train_pkl"]),
-        "val_pkl": str(ds["val_pkl"]),
-        "test_pkl": str(ds["test_pkl"]),
-    }
+    return ds_cfg
 
 
-def read_pkl(path: str, dataset_name: str, split: str) -> pd.DataFrame:
+# ============================================================
+# Input normalization
+# ============================================================
+
+def read_pkl(path: str, dataset_name: str, split_name: str) -> pd.DataFrame:
     path_obj = Path(path)
-    if not path_obj.exists():
-        raise FileNotFoundError(f"{dataset_name} {split} PKL not found: {path_obj}")
 
-    print(f"Reading {dataset_name} {split}: {path_obj}")
-    df = pd.read_pickle(path_obj)
+    if not path_obj.exists():
+        raise FileNotFoundError(
+            f"{dataset_name} {split_name} PKL not found: {path_obj}"
+        )
+
+    print(f"Reading {dataset_name} {split_name}: {path_obj}")
+
+    df = pd.read_pickle(path_obj).copy()
+
     df["__dataset_name__"] = dataset_name
-    df["__split_name__"] = split
+    df["__split_name__"] = split_name
+
     return df
 
 
-def normalize_label_column(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     if "processed_EventTemplate" in df.columns and "EventTemplate" not in df.columns:
         df = df.rename(columns={"processed_EventTemplate": "EventTemplate"})
 
+    # Preserve your previous behavior:
+    # Original_Label is treated as the ground-truth label when it exists.
     if "Original_Label" in df.columns:
-        print("Original_Label unique:", df["Original_Label"].unique())
         if "Label" in df.columns:
-            print("Old Label unique:", df["Label"].unique())
             df = df.drop(columns=["Label"])
         df = df.rename(columns={"Original_Label": "Label"})
 
-    required = ["EventTemplate", "Label"]
-    for col in required:
+    for col in ["EventTemplate", "Label"]:
         if col not in df.columns:
-            raise ValueError(f"Missing required column: {col}. Available columns: {list(df.columns)}")
+            raise ValueError(
+                f"Missing required column '{col}'. "
+                f"Available columns: {list(df.columns)}"
+            )
 
-    return df
-
-
-def ensure_block_col(df: pd.DataFrame, block_col: str) -> pd.DataFrame:
-    if block_col not in df.columns:
-        raise ValueError(f"{block_col} does not exist. Available columns: {list(df.columns)}")
-    return df
-
-
-def prefix_block_ids(df: pd.DataFrame, block_col: str, dataset_name: str, split_name: str) -> pd.DataFrame:
-    """
-    Prevent Node_block_id collisions when different datasets are concatenated.
-
-    This does NOT delete or reorder rows.
-    It only changes the grouping key from:
-        12345
-    to:
-        BGL__train__12345
-    """
-    df = df.copy()
-    df[block_col] = (
-        str(dataset_name)
-        + "__"
-        + str(split_name)
-        + "__"
-        + df[block_col].astype(str)
-    )
     return df
 
 
 def is_normal_label(value) -> bool:
     if pd.isna(value):
         return False
-    s = str(value).strip().lower()
-    return s in {"-", "normal", "0", "false", "benign"}
+
+    return str(value).strip().lower() in {
+        "-", "normal", "0", "false", "benign"
+    }
 
 
-def check_overlap(name_a: str, df_a: pd.DataFrame, name_b: str, df_b: pd.DataFrame, block_col: str):
-    ids_a = set(df_a[block_col].astype(str).unique())
-    ids_b = set(df_b[block_col].astype(str).unique())
-    overlap = ids_a.intersection(ids_b)
+# ============================================================
+# Sequence / block handling
+# ============================================================
 
-    if overlap:
-        print(f"WARNING: {name_a} and {name_b} share {len(overlap)} {block_col} values.")
+def require_block_col(
+    df: pd.DataFrame,
+    block_col: str,
+    dataset_name: str,
+    split_name: str,
+):
+    if block_col not in df.columns:
+        raise ValueError(
+            f"{dataset_name} {split_name}: '{block_col}' does not exist. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+
+def check_split_overlap(
+    dataset_name: str,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    block_col: str,
+    strict: bool,
+):
+    """
+    Check overlap using the ORIGINAL block IDs before prefixes are added.
+    This is useful for HDFS because the same BlockId must not be present
+    in train and test.
+    """
+    train_ids = set(train_df[block_col].astype(str).unique())
+    val_ids = set(val_df[block_col].astype(str).unique())
+    test_ids = set(test_df[block_col].astype(str).unique())
+
+    overlaps = {
+        "train/validation": train_ids & val_ids,
+        "train/test": train_ids & test_ids,
+        "validation/test": val_ids & test_ids,
+    }
+
+    print(f"\n{dataset_name} original {block_col} overlap check:")
+
+    any_overlap = False
+    for pair, ids in overlaps.items():
+        print(f"  {pair}: {len(ids)}")
+        any_overlap = any_overlap or bool(ids)
+
+    if any_overlap and strict:
+        raise ValueError(
+            f"{dataset_name}: overlapping original block IDs were found across "
+            "train/validation/test. Set strict_split_overlap_check: false only "
+            "if these IDs are known to restart independently per split."
+        )
+
+
+def assign_existing_blocks(
+    df: pd.DataFrame,
+    dataset_name: str,
+    split_name: str,
+    block_col: str,
+) -> pd.DataFrame:
+    """
+    Keep Node_block_id unchanged and create a safe internal ID.
+
+    Example:
+        original Node_block_id: 123
+        internal ID: BGL__train__123
+    """
+    require_block_col(df, block_col, dataset_name, split_name)
+
+    out = df.copy()
+    out[SEQUENCE_COL] = (
+        str(dataset_name)
+        + "__"
+        + str(split_name)
+        + "__"
+        + out[block_col].astype(str)
+    )
+    return out
+
+
+def assign_fixed_nonoverlap_windows(
+    df: pd.DataFrame,
+    dataset_name: str,
+    split_name: str,
+    window_size: int,
+) -> pd.DataFrame:
+    """
+    Optional mode for BGL when you want windows to be recreated directly
+    from row order.
+
+    Rows are NOT shuffled.
+    The final incomplete window is dropped.
+    """
+    out = df.copy().reset_index(drop=True)
+
+    complete_rows = (len(out) // window_size) * window_size
+    dropped = len(out) - complete_rows
+
+    if complete_rows == 0:
+        raise ValueError(
+            f"{dataset_name} {split_name}: not enough rows for "
+            f"window_size={window_size}"
+        )
+
+    if dropped > 0:
+        print(
+            f"{dataset_name} {split_name}: dropping {dropped} trailing rows "
+            "that do not form a complete window."
+        )
+
+    out = out.iloc[:complete_rows].copy()
+    sequence_numbers = np.arange(complete_rows) // window_size
+
+    out[SEQUENCE_COL] = [
+        f"{dataset_name}__{split_name}__window_{i}"
+        for i in sequence_numbers
+    ]
+
+    return out
+
+
+def prepare_dataset(
+    cfg: Dict[str, Any],
+    dataset_name: str,
+    window_size: int,
+    default_block_col: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+    ds_cfg = get_dataset_cfg(cfg, dataset_name)
+
+    # Default: preserve the block IDs already present in your PKLs.
+    sequence_mode = ds_cfg.get(
+        "sequence_mode",
+        cfg.get("sequence_mode", "existing_blocks"),
+    )
+
+    block_length_mode = ds_cfg.get(
+        "block_length_mode",
+        cfg.get("block_length_mode", "keep_variable"),
+    )
+
+    block_col = ds_cfg.get(
+        "block_col",
+        cfg.get("block_col", default_block_col),
+    )
+
+    global_strict = bool(cfg.get("strict_split_overlap_check", False))
+    strict_overlap = bool(
+        ds_cfg.get("strict_split_overlap_check", global_strict)
+    )
+
+    if sequence_mode not in {"existing_blocks", "fixed_nonoverlap_rows"}:
+        raise ValueError(
+            "sequence_mode must be existing_blocks or fixed_nonoverlap_rows"
+        )
+
+    if block_length_mode not in {"exact", "keep_variable", "pad_truncate"}:
+        raise ValueError(
+            "block_length_mode must be exact, keep_variable, or pad_truncate"
+        )
+
+    print("\n============================================================")
+    print(f"Dataset: {dataset_name}")
+    print(f"sequence_mode: {sequence_mode}")
+    print(f"block_length_mode: {block_length_mode}")
+    print(f"window_size: {window_size}")
+    print("============================================================")
+
+    train_df = normalize_columns(
+        read_pkl(ds_cfg["train_pkl"], dataset_name, "train")
+    )
+    val_df = normalize_columns(
+        read_pkl(ds_cfg["val_pkl"], dataset_name, "validation")
+    )
+    test_df = normalize_columns(
+        read_pkl(ds_cfg["test_pkl"], dataset_name, "testing")
+    )
+
+    if sequence_mode == "existing_blocks":
+        require_block_col(train_df, block_col, dataset_name, "train")
+        require_block_col(val_df, block_col, dataset_name, "validation")
+        require_block_col(test_df, block_col, dataset_name, "testing")
+
+        check_split_overlap(
+            dataset_name,
+            train_df,
+            val_df,
+            test_df,
+            block_col,
+            strict_overlap,
+        )
+
+        train_df = assign_existing_blocks(
+            train_df, dataset_name, "train", block_col
+        )
+        val_df = assign_existing_blocks(
+            val_df, dataset_name, "validation", block_col
+        )
+        test_df = assign_existing_blocks(
+            test_df, dataset_name, "testing", block_col
+        )
+
     else:
-        print(f"No {block_col} overlap between {name_a} and {name_b}.")
+        train_df = assign_fixed_nonoverlap_windows(
+            train_df, dataset_name, "train", window_size
+        )
+        val_df = assign_fixed_nonoverlap_windows(
+            val_df, dataset_name, "validation", window_size
+        )
+        test_df = assign_fixed_nonoverlap_windows(
+            test_df, dataset_name, "testing", window_size
+        )
+
+        # fixed windows are already exact by construction
+        block_length_mode = "exact"
+
+    return train_df, val_df, test_df, block_length_mode
 
 
-def select_normal_blocks(df: pd.DataFrame, block_col: str, fraction: float, seed: int) -> pd.DataFrame:
-    if fraction <= 0:
-        print("target_normal_fraction is 0. No target train normal blocks will be added.")
-        return df.iloc[0:0].copy()
-
-    if fraction > 1:
-        raise ValueError("target_normal_fraction must be between 0 and 1.")
-
-    normal_block_ids = []
-    for block_id, block_df in df.groupby(block_col, sort=False):
-        if block_df["Label"].map(is_normal_label).all():
-            normal_block_ids.append(block_id)
-
-    print(f"Target train normal blocks available: {len(normal_block_ids)}")
-
-    if len(normal_block_ids) == 0:
-        print("WARNING: No normal target train blocks found.")
-        return df.iloc[0:0].copy()
-
-    rng = np.random.default_rng(seed)
-    sample_size = int(round(len(normal_block_ids) * fraction))
-    sample_size = max(1, sample_size) if fraction > 0 else 0
-    sample_size = min(sample_size, len(normal_block_ids))
-
-    sampled_ids = rng.choice(normal_block_ids, size=sample_size, replace=False)
-    sampled = df[df[block_col].isin(sampled_ids)].copy()
-
-    print(f"Target normal fraction: {fraction}")
-    print(f"Selected target normal blocks: {sample_size}")
-    print(f"Selected target normal rows: {len(sampled)}")
-
-    return sampled
-
+# ============================================================
+# Embeddings
+# ============================================================
 
 def add_or_reuse_vectors(
     dfs: List[pd.DataFrame],
@@ -196,74 +406,87 @@ def add_or_reuse_vectors(
     device: str,
 ) -> List[pd.DataFrame]:
     if all("Vector" in df.columns for df in dfs):
-        print("Vector column found in all dataframes. Reusing existing vectors.")
+        print("Vector exists in all splits. Reusing existing vectors.")
         return dfs
 
-    print(f"Loading embedding model: {model_name}")
-    model = SentenceTransformer(model_name, device=device)
+    print(f"\nLoading embedding model: {model_name}")
 
-    all_templates = pd.concat([df["EventTemplate"] for df in dfs], ignore_index=True)
-    all_templates = all_templates.astype(str).dropna().unique()
-
-    print(f"Encoding unique templates: {len(all_templates)}")
-    embeddings = model.encode(
-        all_templates.tolist(),
-        batch_size=batch_size,
-        show_progress_bar=True,
+    model = SentenceTransformer(
+        model_name,
+        device=device,
     )
 
-    template_to_vector = dict(zip(all_templates, embeddings))
+    templates = pd.concat(
+        [df["EventTemplate"] for df in dfs],
+        ignore_index=True,
+    )
+    templates = templates.dropna().astype(str).unique()
 
-    out = []
+    print(f"Encoding {len(templates)} unique templates")
+
+    embeddings = model.encode(
+        templates.tolist(),
+        batch_size=batch_size,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+    )
+
+    lookup = dict(zip(templates, embeddings))
+
+    outputs = []
+
     for df in dfs:
-        df = df.copy()
-        df["Vector"] = df["EventTemplate"].astype(str).map(template_to_vector)
-        missing = df["Vector"].isna().sum()
-        if missing > 0:
-            raise ValueError(f"{missing} rows could not be mapped to vectors.")
-        out.append(df)
+        out = df.copy()
+        out["Vector"] = out["EventTemplate"].astype(str).map(lookup)
 
-    return out
+        if out["Vector"].isna().any():
+            raise ValueError("Some EventTemplate values could not be embedded.")
+
+        outputs.append(out)
+
+    return outputs
 
 
-def make_npz_by_block(
+# ============================================================
+# NPZ conversion
+# ============================================================
+
+def make_npz(
     df: pd.DataFrame,
+    dataset_name: str,
     mode: str,
-    log_name: str,
     output_dir: str,
-    block_col: str,
     window_size: int,
-    block_length_mode: str = "exact",
+    block_length_mode: str,
 ):
     """
-    Convert blocks to NPZ.
+    One NPZ entry = one complete sequence/block.
 
-    block_length_mode:
-      exact:
-        Keep only blocks with exactly window_size rows.
-        Use this for already fixed-window datasets.
+    Label:
+        [1, 0] -> normal
+        [0, 1] -> anomalous
 
-      keep_variable:
-        Save full variable-length block sequences.
-        DataGenerator pads/truncates to window_size during training.
-        Use this for HDFS BlockId data.
-
-      pad_truncate:
-        Pad/truncate every block to window_size during preprocessing.
+    A sequence is anomalous if at least one row in the sequence is anomalous.
     """
-    x_data, y_data = [], []
+    x_data = []
+    y_data = []
+
+    normal_count = 0
+    anomaly_count = 0
     skipped = 0
     padded = 0
     truncated = 0
-    kept_variable = 0
 
-    if block_length_mode not in {"exact", "keep_variable", "pad_truncate"}:
-        raise ValueError("block_length_mode must be one of: exact, keep_variable, pad_truncate")
+    for _, block_df in tqdm(
+        df.groupby(SEQUENCE_COL, sort=False),
+        desc=f"{dataset_name} {mode}",
+    ):
+        vectors = np.asarray(
+            block_df["Vector"].tolist(),
+            dtype=np.float32,
+        )
 
-    for block_id, block_df in tqdm(df.groupby(block_col, sort=False), desc=f"{mode} blocks"):
-        vectors = np.array(block_df["Vector"].tolist(), dtype=np.float32)
-
-        if vectors.ndim != 2 or vectors.shape[0] == 0:
+        if vectors.ndim != 2 or len(vectors) == 0:
             skipped += 1
             continue
 
@@ -275,24 +498,29 @@ def make_npz_by_block(
 
         elif block_length_mode == "keep_variable":
             x_item = vectors
-            kept_variable += 1
 
-        else:
+        else:  # pad_truncate
             if len(vectors) >= window_size:
                 x_item = vectors[:window_size]
                 if len(vectors) > window_size:
                     truncated += 1
             else:
                 pad_len = window_size - len(vectors)
-                pad = np.zeros((pad_len, vectors.shape[1]), dtype=np.float32)
+                pad = np.zeros(
+                    (pad_len, vectors.shape[1]),
+                    dtype=np.float32,
+                )
                 x_item = np.vstack([vectors, pad])
                 padded += 1
 
         labels = block_df["Label"].tolist()
-        if all(is_normal_label(label) for label in labels):
+
+        if all(is_normal_label(v) for v in labels):
             y = [1, 0]
+            normal_count += 1
         else:
             y = [0, 1]
+            anomaly_count += 1
 
         x_data.append(x_item)
         y_data.append(y)
@@ -300,170 +528,177 @@ def make_npz_by_block(
     if block_length_mode == "keep_variable":
         x_data = np.array(x_data, dtype=object)
     else:
-        x_data = np.array(x_data, dtype=np.float32)
+        x_data = np.asarray(x_data, dtype=np.float32)
 
-    y_data = np.array(y_data, dtype=np.float32)
+    y_data = np.asarray(y_data, dtype=np.float32)
+
+    if len(y_data) == 0:
+        raise ValueError(
+            f"{dataset_name} {mode}: generated dataset is empty. "
+            "Check block_length_mode and window_size."
+        )
 
     os.makedirs(output_dir, exist_ok=True)
-    out_path = Path(output_dir) / f"{log_name}_{mode}_block_w{window_size}.npz"
-    np.savez(out_path, x=x_data, y=y_data)
 
-    print(f"Saved {mode}: {out_path}")
-    print(f"  block_length_mode: {block_length_mode}")
-    print(f"  x shape: {x_data.shape}")
-    print(f"  y shape: {y_data.shape}")
-    print(f"  skipped blocks: {skipped}")
-    print(f"  padded blocks: {padded}")
-    print(f"  truncated blocks: {truncated}")
-    print(f"  kept variable-length blocks: {kept_variable}")
-
-def build_in_domain(cfg: Dict[str, Any]):
-    dataset_name = require(cfg, "in_domain_dataset_name")
-    block_col = cfg.get("block_col", "Node_block_id")
-
-    paths = get_dataset_paths(cfg, dataset_name)
-
-    df_train = ensure_block_col(normalize_label_column(read_pkl(paths["train_pkl"], dataset_name, "train")), block_col)
-    df_val = ensure_block_col(normalize_label_column(read_pkl(paths["val_pkl"], dataset_name, "val")), block_col)
-    df_test = ensure_block_col(normalize_label_column(read_pkl(paths["test_pkl"], dataset_name, "test")), block_col)
-
-    check_overlap("train", df_train, "val", df_val, block_col)
-    check_overlap("train", df_train, "test", df_test, block_col)
-    check_overlap("val", df_val, "test", df_test, block_col)
-
-    return df_train, df_val, df_test
-
-
-def build_cross_dataset(cfg: Dict[str, Any]):
-    source_names = require(cfg, "source_dataset_names")
-    target_name = require(cfg, "target_dataset_name")
-
-    if not isinstance(source_names, list) or len(source_names) == 0:
-        raise ValueError("source_dataset_names must be a non-empty YAML list.")
-
-    block_col = cfg.get("block_col", "Node_block_id")
-    fraction = float(cfg.get("target_normal_fraction", 0.0))
-    seed = int(cfg.get("seed", 123))
-
-    source_train_dfs = []
-    for src_name in source_names:
-        paths = get_dataset_paths(cfg, src_name)
-        df_src_train = read_pkl(paths["train_pkl"], src_name, "train")
-        df_src_train = normalize_label_column(df_src_train)
-        df_src_train = ensure_block_col(df_src_train, block_col)
-
-        # Important fix:
-        # Prefix source block IDs so they cannot collide with other source datasets
-        # or with sampled target-normal blocks after concatenation.
-        # This keeps all rows; it only changes the grouping key.
-        df_src_train = prefix_block_ids(df_src_train, block_col, src_name, "train")
-        source_train_dfs.append(df_src_train)
-
-    target_paths = get_dataset_paths(cfg, target_name)
-    df_target_train = ensure_block_col(
-        normalize_label_column(read_pkl(target_paths["train_pkl"], target_name, "train")),
-        block_col,
-    )
-    df_target_val = ensure_block_col(
-        normalize_label_column(read_pkl(target_paths["val_pkl"], target_name, "val")),
-        block_col,
-    )
-    df_target_test = ensure_block_col(
-        normalize_label_column(read_pkl(target_paths["test_pkl"], target_name, "test")),
-        block_col,
+    path = Path(output_dir) / (
+        f"{dataset_name}_{mode}_block_w{window_size}.npz"
     )
 
-    target_normal = select_normal_blocks(df_target_train, block_col, fraction, seed)
+    np.savez(path, x=x_data, y=y_data)
 
-    # Important fix:
-    # Prefix sampled target-normal block IDs before appending to source training data.
-    # This prevents accidental merging with source dataset blocks.
-    # This keeps all sampled rows.
-    target_normal = prefix_block_ids(
-        target_normal,
-        block_col,
-        target_name,
-        "target_train_normal_sample",
-    )
-
-    df_train = pd.concat(source_train_dfs + [target_normal], ignore_index=True)
-    df_val = df_target_val
-    df_test = df_target_test
-
-    print("Cross-dataset summary:")
-    print(f"  Sources: {source_names}")
-    print(f"  Target: {target_name}")
-    print(f"  Training rows after append: {len(df_train)}")
-    print(f"  Validation rows: {len(df_val)}")
-    print(f"  Testing rows: {len(df_test)}")
-    print(f"  Training unique {block_col} after prefixing: {df_train[block_col].nunique()}")
-
-    for i, src_df in enumerate(source_train_dfs):
-        check_overlap(f"source:{source_names[i]}", src_df, "target_normal_sample", target_normal, block_col)
-    for i in range(len(source_train_dfs)):
-        for j in range(i + 1, len(source_train_dfs)):
-            check_overlap(f"source:{source_names[i]}", source_train_dfs[i], f"source:{source_names[j]}", source_train_dfs[j], block_col)
-
-    return df_train, df_val, df_test
+    print(f"\nSaved: {path}")
+    print(f"  sequences: {len(y_data)}")
+    print(f"  normal: {normal_count}")
+    print(f"  anomaly: {anomaly_count}")
+    print(f"  skipped: {skipped}")
+    print(f"  padded: {padded}")
+    print(f"  truncated: {truncated}")
 
 
-def print_config(cfg: Dict[str, Any]):
-    print("========== Effective Configuration ==========")
-    for key, value in cfg.items():
-        if key == "datasets":
-            print("datasets:")
-            for ds_name, paths in value.items():
-                print(f"  {ds_name}:")
-                print(f"    train_pkl: {paths.get('train_pkl')}")
-                print(f"    val_pkl: {paths.get('val_pkl')}")
-                print(f"    test_pkl: {paths.get('test_pkl')}")
-        else:
-            print(f"{key}: {value}")
-    print("=============================================")
-
+# ============================================================
+# Main
+# ============================================================
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config.yml")
+    parser.add_argument(
+        "--config",
+        default="config_cross_dataset_last.yml",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
 
-    if cfg.get("device") is None:
-        cfg["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+    source_name = get_source_name(cfg)
+    target_name = get_target_name(cfg)
 
-    cfg["window_size"] = int(cfg.get("window_size", 120))
-    cfg["seed"] = int(cfg.get("seed", 123))
-    cfg["embed_batch_size"] = int(cfg.get("embed_batch_size", 128))
-    cfg["target_normal_fraction"] = float(cfg.get("target_normal_fraction", 0.0))
-    cfg["block_length_mode"] = cfg.get("block_length_mode", "exact")
+    if source_name == target_name:
+        raise ValueError("Source and target datasets must be different.")
 
-    print_config(cfg)
+    window_size = int(cfg.get("window_size", 120))
+    output_dir = get_output_dir(cfg)
+    default_block_col = cfg.get("block_col", "Node_block_id")
 
-    setting = cfg.get("setting", "in_domain")
-    if setting == "in_domain":
-        df_train, df_val, df_test = build_in_domain(cfg)
-    elif setting == "cross_dataset":
-        df_train, df_val, df_test = build_cross_dataset(cfg)
+    embedding_model = cfg.get(
+        "embedding_model",
+        "distilbert-base-nli-mean-tokens",
+    )
+    embed_batch_size = int(cfg.get("embed_batch_size", 128))
+
+    device_value = cfg.get("device")
+    if device_value is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
-        raise ValueError("setting must be either in_domain or cross_dataset")
+        device = str(device_value)
 
-    df_train, df_val, df_test = add_or_reuse_vectors(
-        [df_train, df_val, df_test],
-        model_name=cfg.get("embedding_model", "distilbert-base-nli-mean-tokens"),
-        batch_size=cfg["embed_batch_size"],
-        device=cfg["device"],
+    print("\n============================================================")
+    print("SUPERVISED CROSS-DOMAIN PREPROCESSING")
+    print("============================================================")
+    print(f"Source: {source_name}")
+    print(f"Target: {target_name}")
+    print(f"Window size: {window_size}")
+    print(f"Output directory: {output_dir}")
+    print("NO source/target concatenation.")
+    print("NO target fraction is selected during preprocessing.")
+    print("============================================================")
+
+    source_train, source_val, source_test, source_length_mode = prepare_dataset(
+        cfg,
+        source_name,
+        window_size,
+        default_block_col,
     )
 
-    make_npz_by_block(
-        df_train, "training", cfg["log_name"], cfg["output_dir"], cfg["block_col"], cfg["window_size"], cfg["block_length_mode"]
+    target_train, target_val, target_test, target_length_mode = prepare_dataset(
+        cfg,
+        target_name,
+        window_size,
+        default_block_col,
     )
-    make_npz_by_block(
-        df_val, "validation", cfg["log_name"], cfg["output_dir"], cfg["block_col"], cfg["window_size"], cfg["block_length_mode"]
+
+    (
+        source_train,
+        source_val,
+        source_test,
+        target_train,
+        target_val,
+        target_test,
+    ) = add_or_reuse_vectors(
+        [
+            source_train,
+            source_val,
+            source_test,
+            target_train,
+            target_val,
+            target_test,
+        ],
+        embedding_model,
+        embed_batch_size,
+        device,
     )
-    make_npz_by_block(
-        df_test, "testing", cfg["log_name"], cfg["output_dir"], cfg["block_col"], cfg["window_size"], cfg["block_length_mode"]
+
+    # SOURCE
+    make_npz(
+        source_train,
+        source_name,
+        "training",
+        output_dir,
+        window_size,
+        source_length_mode,
     )
+    make_npz(
+        source_val,
+        source_name,
+        "validation",
+        output_dir,
+        window_size,
+        source_length_mode,
+    )
+    make_npz(
+        source_test,
+        source_name,
+        "testing",
+        output_dir,
+        window_size,
+        source_length_mode,
+    )
+
+    # TARGET -- complete training set, both classes
+    make_npz(
+        target_train,
+        target_name,
+        "training",
+        output_dir,
+        window_size,
+        target_length_mode,
+    )
+    make_npz(
+        target_val,
+        target_name,
+        "validation",
+        output_dir,
+        window_size,
+        target_length_mode,
+    )
+    make_npz(
+        target_test,
+        target_name,
+        "testing",
+        output_dir,
+        window_size,
+        target_length_mode,
+    )
+
+    print("\n============================================================")
+    print("FINISHED")
+    print("============================================================")
+    print("Created independent source and target NPZ files.")
+    print("The target TRAIN NPZ contains normal + anomalous blocks.")
+    print(
+        "The supervised fraction will be sampled later by "
+        "tune_transformer_pkl_ready_last.py."
+    )
+    print("============================================================")
 
 
 if __name__ == "__main__":
