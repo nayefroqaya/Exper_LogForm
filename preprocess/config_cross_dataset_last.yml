@@ -55,7 +55,7 @@
 #   final evaluation once
 # ------------------------------------------------------------
 
-setting: in_domain #cross_dataset
+setting: cross_dataset
 
 
 # ============================================================
@@ -65,7 +65,7 @@ setting: in_domain #cross_dataset
 # setting: in_domain
 # ============================================================
 
-in_domain_dataset_name: SP_150MB_ratio
+#in_domain_dataset_name: SP_150MB_ratio
 
 
 # ============================================================
@@ -77,8 +77,8 @@ in_domain_dataset_name: SP_150MB_ratio
 
 # Choose 1, 2, or 3 sources.
 
-#source_dataset_names:
-#  - BGL
+source_dataset_names:
+  - BGL
 #  - HDFS
 
 # Examples:
@@ -102,7 +102,7 @@ in_domain_dataset_name: SP_150MB_ratio
 # Exactly ONE target.
 # Target cannot also be a source.
 
-#target_dataset_name: TH_1G
+target_dataset_name: HDFS
 
 
 # ============================================================
