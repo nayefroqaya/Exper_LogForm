@@ -79,7 +79,7 @@ setting: cross_dataset
 
 source_dataset_names:
   - BGL
-#  - HDFS
+  - HDFS
 
 # Examples:
 #
