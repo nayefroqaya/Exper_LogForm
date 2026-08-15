@@ -59,7 +59,7 @@ target_dataset_name: HDFS
 # ============================================================
 
 # For LogFormer reproduction use 20.
-window_size: 20
+window_size: 120
 
 # Existing grouping column in your PKL files.
 block_col: Node_block_id

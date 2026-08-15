@@ -3,7 +3,7 @@
 Dataset-name based PKL selector + preprocessor for LogFormer.
 
 Run:
-    python preprocess_dataset_selector_from_config_no_overlap.py --config config_cross_dataset.yml
+    python preprocess_dataset_selector_from_config_no_overlap.py --config XXXXXXXconfig_cross_dataset.yml
 
 In-domain:
     Uses one dataset's train/val/test PKLs.
