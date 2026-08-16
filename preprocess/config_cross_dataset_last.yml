@@ -78,8 +78,8 @@ setting: cross_dataset
 # Choose 1, 2, or 3 sources.
 
 source_dataset_names:
-  - HDFS
-  - SP_150MB_ratio
+  #- HDFS
+  #- SP_150MB_ratio
   - BGL
 
 # Examples:

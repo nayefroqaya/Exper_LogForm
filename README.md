@@ -38,33 +38,19 @@ If you feel helpful, please cite our paper.
 # ============================================================
 
 # 1. Preprocess BGL and HDFS independently
-python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py \
+python preprocess/preprocess_only_normal_dataset_selector_from_config_no_overlap_last.py \
   --config preprocess/config_cross_dataset_last.yml
 
 
 # 2. Pre-train LogFormer on SOURCE BGL only
-python train_transformer_pkl_ready_last.py \
+python Fraktion_only_normal_train_transformer_pkl_ready_last.py \
   --config preprocess/config_cross_dataset_last.yml
 
 
 # 3. Tune the pretrained BGL model on TARGET HDFS
 #    Uses the configured fraction of HDFS train:
 #    normal + anomaly
-python tune_transformer_pkl_ready_last.py \
+python Frackition_only_normal_tune_transformer_pkl_ready_last.py \
   --config preprocess/config_cross_dataset_last.yml
-- 
- ### --load_path checkpoints/YOUR_SOURCE_MODEL-best.pt
-## ----------- In domain running  : 
 
-- python preprocess/preprocess_dataset_selector_from_config_no_overlap_last.py --config preprocess/config_cross_dataset_last.yml
 
-- python train_transformer_pkl_ready_last_paper4.py \
-  --log_name SP_150MB_ratio \
-  --window_size 120 \
-  --preprocessed_dir preprocess/preprocessed_data
-
-- python tune_transformer_pkl_ready_last.py \
-  --log_name BGL \
-  --window_size 120 \
-  --preprocessed_dir preprocess/preprocessed_data \
-  --pretrained_log_name random

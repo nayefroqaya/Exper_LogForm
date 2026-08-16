@@ -10,7 +10,7 @@ Behavior:
    No transfer/adaptation stage is needed.
    This script exits cleanly with a message.
    The final in-domain result is produced by
-   train_transformer_pkl_ready_last.py.
+   Fraktion_normaandanomal_train_transformer_pkl_ready_last.py.
 
 2) CROSS-DATASET
    setting: cross_dataset
@@ -411,7 +411,7 @@ def main():
             "No tune/transfer stage is required for in-domain LogFormer."
         )
         print(
-            "Use train_transformer_pkl_ready_last.py for "
+            "Use Fraktion_normaandanomal_train_transformer_pkl_ready_last.py for "
             "train -> validation -> final test."
         )
         print("Nothing was changed.")
@@ -694,7 +694,7 @@ def main():
     if not os.path.exists(source_checkpoint):
         raise FileNotFoundError(
             f"Source checkpoint not found: {source_checkpoint}\n"
-            "Run train_transformer_pkl_ready_last.py first."
+            "Run Fraktion_normaandanomal_train_transformer_pkl_ready_last.py first."
         )
 
     source_ckpt = torch.load(
