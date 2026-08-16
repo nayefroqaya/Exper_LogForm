@@ -10,7 +10,7 @@ Behavior:
    No transfer/adaptation stage is needed.
    This script exits cleanly with a message.
    The final in-domain result is produced by
-   Fraktion_normaandanomal_train_transformer_pkl_ready_last.py.
+   train_transformer_pkl_ready_last.py.
 
 2) CROSS-DATASET
    setting: cross_dataset
@@ -22,9 +22,9 @@ Behavior:
    Pipeline:
        load combined-source checkpoint
            ->
-       sample target_train_fraction from BOTH:
+       sample target_normal_fraction from ONLY:
            normal target train blocks
-           anomaly target train blocks
+       target anomaly training blocks are NOT used
            ->
        adapter tuning
            ->
@@ -198,8 +198,8 @@ def select_normal_target_fraction(
         20% of NORMAL target training blocks
         0% of ANOMALOUS target training blocks
 
-    Each NPZ item is one complete block/sequence, so block
-    boundaries are preserved.
+    Sampling is performed at complete NPZ block/sequence level.
+    No block/sequence is cut.
     """
     if not (0 < fraction <= 1):
         raise ValueError(
@@ -221,30 +221,33 @@ def select_normal_target_fraction(
     print(f"  normal:  {len(normal_idx)}")
     print(f"  anomaly: {len(anomaly_idx)}")
 
-    rng = np.random.default_rng(seed)
+    if fraction == 1.0:
+        selected = normal_idx.copy()
+    else:
+        rng = np.random.default_rng(seed)
 
-    n_normal = max(
-        1,
-        int(round(len(normal_idx) * fraction)),
-    )
+        n_normal = max(
+            1,
+            int(round(len(normal_idx) * fraction)),
+        )
 
-    n_normal = min(
-        n_normal,
-        len(normal_idx),
-    )
+        n_normal = min(
+            n_normal,
+            len(normal_idx),
+        )
 
-    selected = rng.choice(
-        normal_idx,
-        size=n_normal,
-        replace=False,
-    )
+        selected = rng.choice(
+            normal_idx,
+            size=n_normal,
+            replace=False,
+        )
 
-    rng.shuffle(selected)
+        rng.shuffle(selected)
 
     x_selected = x[selected]
     y_selected = y[selected]
 
-    # Safety check: adaptation data must contain ZERO anomalies.
+    # Safety check: target adaptation must contain zero anomalies.
     selected_labels = np.argmax(y_selected, axis=1)
 
     if np.any(selected_labels != 0):
@@ -390,7 +393,7 @@ def main():
             "No tune/transfer stage is required for in-domain LogFormer."
         )
         print(
-            "Use Fraktion_normaandanomal_train_transformer_pkl_ready_last.py for "
+            "Use train_transformer_pkl_ready_last.py for "
             "train -> validation -> final test."
         )
         print("Nothing was changed.")
@@ -432,16 +435,10 @@ def main():
     epochs = int(cfg.get("target_epochs", 20))
     lr = float(cfg.get("target_lr", 1e-5))
 
-    # Preferred key for this normal-only version:
-    #     target_normal_fraction: 0.20
-    #
-    # Backward-compatible fallback:
-    # if the existing YAML still contains target_train_fraction: 0.20,
-    # the numeric value is reused, but sampling remains NORMAL ONLY.
     target_normal_fraction = float(
         cfg.get(
             "target_normal_fraction",
-            cfg.get("target_train_fraction", 0.20),
+            0.20,
         )
     )
 
@@ -563,12 +560,7 @@ def main():
     print("Using device:", device)
 
     # ========================================================
-    # Load TARGET TRAIN + VALIDATION only.
-    #
-    # IMPORTANT:
-    # The target TEST split is deliberately NOT loaded here.
-    # It remains untouched until training is complete and the
-    # best checkpoint has been selected using validation F1.
+    # Load target train / validation / test
     # ========================================================
 
     x_train_full, y_train_full = load_split(
@@ -582,6 +574,13 @@ def main():
         preprocessed_dir,
         target_name,
         "validation",
+        window_size,
+    )
+
+    x_test, y_test = load_split(
+        preprocessed_dir,
+        target_name,
+        "testing",
         window_size,
     )
 
@@ -617,8 +616,9 @@ def main():
         "Target validation",
         y_val,
     )
-    print(
-        "Target test: NOT LOADED / NOT TOUCHED YET"
+    print_distribution(
+        "Target test",
+        y_test,
     )
     print("============================================================")
 
@@ -646,6 +646,15 @@ def main():
         shuffle=False,
     )
 
+    test_loader = torch.utils.data.DataLoader(
+        DataGenerator(
+            x_test,
+            y_test,
+            window_size,
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+    )
 
     # ========================================================
     # Build target adapter model
@@ -671,7 +680,7 @@ def main():
     if not os.path.exists(source_checkpoint):
         raise FileNotFoundError(
             f"Source checkpoint not found: {source_checkpoint}\n"
-            "Run Fraktion_normaandanomal_train_transformer_pkl_ready_last.py first."
+            "Run train_transformer_pkl_ready_last.py first."
         )
 
     source_ckpt = torch.load(
@@ -931,10 +940,6 @@ def main():
 
     # ========================================================
     # Final target test ONCE
-    #
-    # The TEST split is loaded only now, after all target
-    # adaptation epochs are complete and the best checkpoint
-    # has already been selected using validation F1.
     # ========================================================
 
     best_checkpoint = torch.load(
@@ -950,24 +955,6 @@ def main():
         model.load_state_dict(
             best_checkpoint["net"]
         )
-
-    # Load target TEST only for the final evaluation.
-    x_test, y_test = load_split(
-        preprocessed_dir,
-        target_name,
-        "testing",
-        window_size,
-    )
-
-    test_loader = torch.utils.data.DataLoader(
-        DataGenerator(
-            x_test,
-            y_test,
-            window_size,
-        ),
-        batch_size=batch_size,
-        shuffle=False,
-    )
 
     test_result = evaluate(
         model,
