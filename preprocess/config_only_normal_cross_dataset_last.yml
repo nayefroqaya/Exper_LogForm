@@ -16,8 +16,8 @@
 # ------------------------------------------------------------
 #
 #
-setting: in_domain
-in_domain_dataset_name: BGL
+#setting: in_domain
+#in_domain_dataset_name: BGL
 #
 # In-domain pipeline:
 #   BGL train
@@ -72,15 +72,15 @@ in_domain_dataset_name: BGL
 # CROSS-DATASET SELECTION
 #
 # Used ONLY when:
-# setting: cross_dataset
+setting: cross_dataset
 # ============================================================
 
 # Choose 1, 2, or 3 sources.
 
-#source_dataset_names:
+source_dataset_names:
 #  - HDFS
 #  - BGL
-#  - SP_150MB_ratio
+  - TH_1G
 
 # Examples:
 #
@@ -103,7 +103,7 @@ in_domain_dataset_name: BGL
 # Exactly ONE target.
 # Target cannot also be a source.
 
-#target_dataset_name: TH_1G
+target_dataset_name: SP_150MB_ratio
 
 
 # ============================================================
