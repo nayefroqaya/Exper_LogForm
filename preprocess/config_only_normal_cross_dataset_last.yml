@@ -103,7 +103,7 @@ source_dataset_names:
 # Exactly ONE target.
 # Target cannot also be a source.
 
-target_dataset_name: HDFS
+target_dataset_name: TH_1G
 
 
 # ============================================================
