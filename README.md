@@ -36,7 +36,7 @@ If you feel helpful, please cite our paper.
 # ============================================================
 # Cross-dataset supervised LogFormer: BGL -> HDFS
 # ============================================================
-
+# Normakl + anomaly in train 
 # 1. Preprocess BGL and HDFS independently
 # No change in this python file for normal only
 python preprocess/preprocess_normalandanomaly_dataset_selector_from_config_no_overlap_last.py \
@@ -56,4 +56,15 @@ python Fraktion_normaandanomal_train_transformer_pkl_ready_last.py \
 python Frackition_normalandanomal_tune_transformer_pkl_ready_last.py \
   --config preprocess/config_cross_dataset_last.yml
 
+#------
 
+Only Normal : 
+python preprocess/preprocess_only_normal_dataset_selector_from_config_no_overlap_last.py \
+  --config preprocess/config_only_normal_cross_dataset_last.yml
+
+
+python Fraktion_only_normal_train_transformer_pkl_ready_last.py \
+  --config preprocess/config_only_normal_cross_dataset_last.yml
+
+python Frackition_only_normal_tune_transformer_pkl_ready_last.py \
+  --config preprocess/config_only_normal_cross_dataset_last.yml
