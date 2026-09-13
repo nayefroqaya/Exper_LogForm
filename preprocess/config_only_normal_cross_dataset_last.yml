@@ -79,8 +79,8 @@ setting: cross_dataset
 
 source_dataset_names:
 #  - HDFS
-  - BGL
-#  - TH_1G
+#  - BGL
+  - TH_1G
 
 # Examples:
 #
@@ -103,7 +103,7 @@ source_dataset_names:
 # Exactly ONE target.
 # Target cannot also be a source.
 
-target_dataset_name: TH_1G
+target_dataset_name: SP_150MB_ratio
 
 
 # ============================================================
