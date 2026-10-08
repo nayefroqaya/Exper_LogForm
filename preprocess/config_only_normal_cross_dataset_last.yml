@@ -62,25 +62,25 @@
 # IN-DOMAIN SELECTION
 #
 # Used ONLY when:
-# setting: in_domain
+ setting: in_domain
 # ============================================================
 
-#in_domain_dataset_name: SP_150MB_ratio
+in_domain_dataset_name: SP_150MB_ratio
 
 
 # ============================================================
 # CROSS-DATASET SELECTION
 #
 # Used ONLY when:
-setting: cross_dataset
+#setting: cross_dataset
 # ============================================================
 
 # Choose 1, 2, or 3 sources.
 
-source_dataset_names:
-  - HDFS
-  - BGL
-  - SP_150MB_ratio
+#source_dataset_names:
+#  - HDFS
+#  - BGL
+#  - SP_150MB_ratio
 
 # Examples:
 #
