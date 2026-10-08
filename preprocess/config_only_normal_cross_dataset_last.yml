@@ -62,7 +62,7 @@
 # IN-DOMAIN SELECTION
 #
 # Used ONLY when:
- setting: in_domain
+setting: in_domain
 # ============================================================
 
 in_domain_dataset_name: SP_150MB_ratio
