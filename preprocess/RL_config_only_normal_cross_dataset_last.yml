@@ -1,0 +1,356 @@
+# ============================================================
+# Unified LogFormer Configuration
+#
+# Supports BOTH:
+#   1. in_domain
+#   2. cross_dataset
+# ============================================================
+
+
+# ============================================================
+# SELECT EXPERIMENT TYPE
+# ============================================================
+
+# ------------------------------------------------------------
+# OPTION A: IN-DOMAIN
+# ------------------------------------------------------------
+#
+#
+#setting: in_domain
+#in_domain_dataset_name: BGL
+#
+# In-domain pipeline:
+#   BGL train
+#       ->
+#   BGL validation selects best checkpoint
+#       ->
+#   BGL test once
+#
+# tune_transformer is NOT needed.
+# If called, it exits cleanly.
+# ------------------------------------------------------------
+
+
+# ------------------------------------------------------------
+# OPTION B: CROSS-DATASET
+# ------------------------------------------------------------
+#
+# Current active example:
+#
+# Sources = BGL + HDFS
+# Target  = TH_1G
+#
+# Source pretraining:
+#   FULL BGL train  normal + anomaly
+#   FULL HDFS train normal + anomaly
+#
+# Target adaptation:
+#   20% TH_1G normal train
+#       +
+#   20% TH_1G anomaly train
+#
+# Target validation:
+#   model selection
+#
+# Target test:
+#   final evaluation once
+# ------------------------------------------------------------
+
+
+
+# ============================================================
+# IN-DOMAIN SELECTION
+#
+# Used ONLY when:
+setting: in_domain
+# ============================================================
+
+in_domain_dataset_name: SP_150MB_ratio
+
+
+# ============================================================
+# CROSS-DATASET SELECTION
+#
+# Used ONLY when:
+#setting: cross_dataset
+# ============================================================
+
+# Choose 1, 2, or 3 sources.
+
+#source_dataset_names:
+#  - HDFS
+#  - BGL
+#  - SP_150MB_ratio
+
+# Examples:
+#
+# One source:
+# source_dataset_names:
+#   - BGL
+#
+# Two sources:
+# source_dataset_names:
+#   - BGL
+#   - HDFS
+#
+# Three sources:
+# source_dataset_names:
+#   - BGL
+#   - HDFS
+#   - SP_150MB_ratio
+
+
+# Exactly ONE target.
+# Target cannot also be a source.
+
+target_dataset_name: TH_1G
+
+
+# ============================================================
+# GLOBAL WINDOW / SEQUENCE SETTINGS
+# ============================================================
+
+window_size: 120
+
+block_col: Node_block_id
+
+seed: 123
+
+
+# ============================================================
+# DIRECTORIES
+# ============================================================
+
+output_dir: preprocess/preprocessed_data
+
+preprocessed_dir: preprocess/preprocessed_data
+
+result_dir: result_RL
+
+checkpoint_dir: checkpoints_RL
+
+
+
+# ============================================================
+# RL-PAPER COMPARISON METRICS
+# These values affect ONLY reported costs, not model training.
+# ============================================================
+
+fp_unit_cost: 10.0
+fn_unit_cost: 20.0
+delay_unit_cost: 5.0
+
+# ============================================================
+# EMBEDDING
+# ============================================================
+
+embedding_model: distilbert-base-nli-mean-tokens
+
+embed_batch_size: 128
+
+# null = automatically select CUDA if available
+device: null
+
+
+# ============================================================
+# CROSS-DATASET TARGET ADAPTATION
+#
+# Used ONLY by tune_transformer in cross_dataset mode.
+# ============================================================
+
+# SUPERVISED LogFormer:
+#
+# 0.20 means:
+#
+#   20% of target NORMAL training blocks
+#              +
+#   20% of target ANOMALOUS training blocks
+#
+# It is NOT normal-only.
+#
+# Examples:
+#   0.0125 = 1.25%
+#   0.025  = 2.5%
+#   0.05   = 5%
+#   0.10   = 10%
+#   0.20   = 20%
+#   1.00   = 100%
+
+#target_train_fraction: 0.20
+target_normal_fraction: 0.20
+target_sampling_seed: 123
+
+
+# ============================================================
+# DATASET REGISTRY
+#
+# Per-dataset:
+#
+# sequence_mode:
+#   existing_blocks
+#       -> use existing Node_block_id grouping
+#
+#   fixed_nonoverlap_rows
+#       -> rebuild consecutive windows from row order
+#
+# block_length_mode:
+#   exact
+#   keep_variable
+#   pad_truncate
+# ============================================================
+
+datasets:
+
+  # ----------------------------------------------------------
+  # BGL
+  # ----------------------------------------------------------
+  BGL:
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/BGL/1_BGL_Splitted_Datasets/test_df.pkl
+
+    # For 120-window controlled comparison:
+    # rebuild consecutive non-overlapping 120-log sequences.
+    #
+    # If your PKLs ALREADY contain the exact desired 120-log
+    # Node_block_id windows, you may instead use:
+    #
+    # sequence_mode: existing_blocks
+    #
+    sequence_mode: fixed_nonoverlap_rows
+
+    block_length_mode: exact
+
+    strict_split_overlap_check: false
+
+
+  # ----------------------------------------------------------
+  # HDFS
+  # ----------------------------------------------------------
+  HDFS:
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
+
+    # HDFS sequences are naturally grouped by BlockId /
+    # Node_block_id.
+    sequence_mode: existing_blocks
+
+    # Preserve complete variable-length HDFS blocks.
+    # DataGenerator pads/truncates each sequence to window_size.
+    block_length_mode: keep_variable
+
+    # Recommended for HDFS:
+    # fail if the same original BlockId appears in two splits.
+    strict_split_overlap_check: true
+
+
+  # ----------------------------------------------------------
+  # THUNDERBIRD
+  # ----------------------------------------------------------
+  TH_1G:
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
+
+    # Your PKLs contain Node_block_id.
+    sequence_mode: existing_blocks
+
+    # If all Node_block_id groups are exactly 120 rows.
+    block_length_mode: exact
+
+    strict_split_overlap_check: false
+
+
+  # ----------------------------------------------------------
+  # SPIRIT
+  # ----------------------------------------------------------
+  SP_150MB_ratio:
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/test_df.pkl
+
+    sequence_mode: existing_blocks
+
+    # If all Node_block_id groups are exactly 120 rows.
+    block_length_mode: exact
+
+    strict_split_overlap_check: false
+
+
+# ============================================================
+# MODEL
+# ============================================================
+
+embedding_dim: 768
+
+num_layers: 1
+
+adapter_size: 64
+
+nhead: 8
+
+dropout: 0.1
+
+feedforward_multiplier: 4
+
+
+# ============================================================
+# TRAINING
+#
+# Used for:
+#   - in-domain training
+#   - cross-dataset source pretraining
+# ============================================================
+
+source_mode: classifier
+
+source_batch_size: 64
+
+source_epochs: 5
+
+source_lr: 0.00001
+
+
+# ============================================================
+# CROSS-DATASET TARGET TUNING
+# ============================================================
+
+tune_mode: adapter
+
+target_batch_size: 64
+
+target_epochs: 20
+
+target_lr: 0.00001
+
+# Preserve your previous tuning behavior:
+# do not transfer the source fc1 classifier weights.
+reinitialize_classifier: false
+
+
+# ============================================================
+# OPTIONAL CUSTOM CHECKPOINT NAMES
+#
+# Normally LEAVE THESE COMMENTED.
+#
+# If commented, names are created automatically.
+# ============================================================
+
+# source_best_checkpoint: checkpoints/custom_source_best.pt
+# source_latest_checkpoint: checkpoints/custom_source_latest.pt
+
+# target_best_checkpoint: checkpoints/custom_target_best.pt
+# target_latest_checkpoint: checkpoints/custom_target_latest.pt
