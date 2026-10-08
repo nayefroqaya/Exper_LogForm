@@ -59,25 +59,25 @@ python Frackition_normalandanomal_tune_transformer_pkl_ready_last.py \
 
 ### Only Normal : 
 In yml file : setting: cross_dataset
-python preprocess/preprocess_only_normal_dataset_selector_from_config_no_overlap_last.py \
+- python preprocess/preprocess_only_normal_dataset_selector_from_config_no_overlap_last.py \
   --config preprocess/config_only_normal_cross_dataset_last.yml
 
 
-python Fraktion_only_normal_train_transformer_pkl_ready_last.py \
+- python Fraktion_only_normal_train_transformer_pkl_ready_last.py \
   --config preprocess/config_only_normal_cross_dataset_last.yml
 
-python Frackition_only_normal_tune_transformer_pkl_ready_last.py \
+- python Frackition_only_normal_tune_transformer_pkl_ready_last.py \
   --config preprocess/config_only_normal_cross_dataset_last.yml
 
 
 ### In domain  : 
 - From YML file : setting =  in_domain
-python preprocess/preprocess_only_normal_dataset_selector_from_config_no_overlap_last.py \
+- python preprocess/preprocess_only_normal_dataset_selector_from_config_no_overlap_last.py \
   --config preprocess/config_only_normal_cross_dataset_last.yml
 
 
-python Fraktion_only_normal_train_transformer_pkl_ready_last.py \
+- python Fraktion_only_normal_train_transformer_pkl_ready_last.py \
   --config preprocess/config_only_normal_cross_dataset_last.yml
 
-python Frackition_only_normal_tune_transformer_pkl_ready_last.py \
+- python Frackition_only_normal_tune_transformer_pkl_ready_last.py \
   --config preprocess/config_only_normal_cross_dataset_last.yml
