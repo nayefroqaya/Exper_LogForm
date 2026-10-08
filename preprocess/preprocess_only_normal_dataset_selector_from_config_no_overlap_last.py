@@ -700,7 +700,7 @@ def main():
 
     parser.add_argument(
         "--config",
-        default="preprocess/config_cross_dataset_last.yml",
+        default="preprocess/config_only_normal_cross_dataset_last.yml",
     )
 
     args = parser.parse_args()
