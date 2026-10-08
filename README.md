@@ -40,19 +40,19 @@ If you feel helpful, please cite our paper.
 
 In yml file : setting: cross_dataset
 
-python preprocess/preprocess_normalandanomaly_dataset_selector_from_config_no_overlap_last.py \
+- python preprocess/preprocess_normalandanomaly_dataset_selector_from_config_no_overlap_last.py \
   --config preprocess/config_cross_dataset_last.yml
 
 
-# 2. Pre-train LogFormer on SOURCE BGL only
-python Fraktion_normaandanomal_train_transformer_pkl_ready_last.py \
+### Pre-train LogFormer on SOURCE only X
+- python Fraktion_normaandanomal_train_transformer_pkl_ready_last.py \
   --config preprocess/config_cross_dataset_last.yml
 
 
-# 3. Tune the pretrained BGL model on TARGET HDFS
-#    Uses the configured fraction of HDFS train:
-#    normal + anomaly
-python Frackition_normalandanomal_tune_transformer_pkl_ready_last.py \
+### Tune the pretrained X model on TARGET Y
+###    Uses the configured fraction of HDFS train:
+###    normal + anomaly
+- python Frackition_normalandanomal_tune_transformer_pkl_ready_last.py \
   --config preprocess/config_cross_dataset_last.yml
 
 ####------
