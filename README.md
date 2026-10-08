@@ -33,10 +33,10 @@ If you feel helpful, please cite our paper.
 }
 ```
 
-# ============================================================
-# Cross-dataset supervised LogFormer: BGL -> HDFS
-# ============================================================
-# Normakl + anomaly in train 
+####------
+### Cross-dataset supervised LogFormer: BGL -> HDFS
+####------
+### Normakl + anomaly in train 
 
 In yml file : setting: cross_dataset
 
@@ -55,7 +55,7 @@ python Fraktion_normaandanomal_train_transformer_pkl_ready_last.py \
 python Frackition_normalandanomal_tune_transformer_pkl_ready_last.py \
   --config preprocess/config_cross_dataset_last.yml
 
-#------
+####------
 
 ### Only Normal : 
 In yml file : setting: cross_dataset
