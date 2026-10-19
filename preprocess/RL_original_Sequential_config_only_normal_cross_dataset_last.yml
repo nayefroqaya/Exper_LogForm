@@ -65,7 +65,7 @@
 setting: in_domain
 # ============================================================
 
-in_domain_dataset_name: HDFS
+in_domain_dataset_name: SP_150MB_ratio
 
 
 # ============================================================
@@ -103,7 +103,7 @@ in_domain_dataset_name: HDFS
 # Exactly ONE target.
 # Target cannot also be a source.
 
-target_dataset_name: HDFS
+target_dataset_name: SP_150MB_ratio
 
 
 # ============================================================
