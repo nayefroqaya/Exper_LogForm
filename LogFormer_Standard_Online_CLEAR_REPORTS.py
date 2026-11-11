@@ -1291,13 +1291,43 @@ def run_experiment(args):
             else:
                 print("Online bounded-window diagnostics unavailable: regenerate NPZ with revised preprocessing.")
     if len(reports) == 2:
-        print("\n" + "=" * 76)
-        print(f"{'Metric':25s} | {'Standard (sequence)':>22s} | {'Online (sequence)':>22s}")
-        print("=" * 76)
-        for k in ("Precision", "Recall", "F1", "FPR", "TP", "TN", "FP", "FN", "Avg Detection Ratio", "EDR@25", "EDR@50", "EDR@75", "False-positive Cost", "False-negative Cost", "Delay Cost", "Total Cost"):
-            a, b = reports["standard"][k], reports["online"]["metrics"][k]
-            print(f"{k:25s} | {str(round(a, 5)) if a is not None else 'N/A':>22s} | {str(round(b, 5)) if b is not None else 'N/A':>22s}")
-        print("=" * 76)
+        # Match PLELog Standard vs Online reporting exactly; display-only change.
+        metric_names = [
+            ("Precision", "Precision"), ("Recall", "Recall"),
+            ("F1", "F1"), ("FPR", "FPR"),
+            ("Avg Detection Ratio", "AvgRatio"),
+            ("EDR@25", "EDR@25"), ("EDR@50", "EDR@50"),
+            ("EDR@75", "EDR@75"),
+            ("False-positive Cost", "FP Cost"),
+            ("False-negative Cost", "FN Cost"),
+            ("Delay Cost", "Delay Cost"),
+            ("Total Cost", "Total Cost"),
+        ]
+        standard_metrics = reports["standard"]
+        online_metrics = reports["online"]["metrics"]
+        def fmt_metric(value):
+            return "N/A" if value is None else f"{float(value):.6f}"
+        lines = [
+            "=" * 76,
+            f"LogFormer {dataset} - ORIGINAL TRAINING, STANDARD vs ONLINE",
+            "=" * 76,
+            f"{'Metric':<23} {'Standard':>23} {'Online':>23}",
+            "-" * 76,
+        ]
+        for key, label in metric_names:
+            lines.append(
+                f"{label:<23} {fmt_metric(standard_metrics.get(key)):>23} "
+                f"{fmt_metric(online_metrics.get(key)):>23}"
+            )
+        lines.append("=" * 76)
+        table = "\n".join(lines)
+        print("\n" + table)
+        (results_dir / f"{dataset}_LogFormer_Standard_vs_Online.txt").write_text(
+            table + "\n", encoding="utf-8"
+        )
+    if len(reports) == 2:
+        from LogFormer_Prediction_Audit import audit_prediction_outputs
+        reports["prediction_audit"] = audit_prediction_outputs(dataset, results_dir)
     print(f"\nResults saved under: {results_dir.resolve()}")
     return reports
 
