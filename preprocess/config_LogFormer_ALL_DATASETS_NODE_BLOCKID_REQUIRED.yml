@@ -46,9 +46,12 @@ datasets:
     overlap_id_col: Node_block_id
 
   SP_150MB_ratio:
-    train_pkl: ../../LWADLS/datasets/SP_150MB_ratio/train.pkl
-    val_pkl: ../../LWADLS/datasets/SP_150MB_ratio/val.pkl
-    test_pkl: ../../LWADLS/datasets/SP_150MB_ratio/test.pkl
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/SP_150MB_ratio/1_SP_150MB_ratio_Splitted_Datasets/test_df.pkl
+
     sequence_mode: fixed_nonoverlap_rows
     block_length_mode: exact
     overlap_id_col: Node_block_id
