@@ -1271,7 +1271,7 @@ def run_experiment(args):
         report_json(results_dir / f"{dataset}_LogFormer_Standard.json", {
             **common, "mode": "standard", "metrics": std,
             "inference_seconds": time.perf_counter() - t0})
-        print_metric_report("LogFormer STANDARD — full-sequence reference", std)
+        print_metric_report("LogFormer STANDARD — sequence-level (full-sequence detection)", std)
     if args.variant in ("online", "both"):
         online = eval_online(model, x_test, y_test, extras, window_size, device,
                              results_dir, dataset, args.online_batch_size, args.online_min_events)
@@ -1284,16 +1284,17 @@ def run_experiment(args):
                 "summaries, NOT retracted or recomputed inference decisions. "
                 "For event-level performance use online_window_decision_metrics. "
                 "No online labels are used to adapt the model.")})
-        print_metric_report("LogFormer ONLINE — sequence-level alert summary", online["metrics"])
-        if online["online_window_decision_metrics"] is not None:
-            print_metric_report("LogFormer ONLINE — emitted bounded-window decisions", online["online_window_decision_metrics"])
-        else:
-            print("Event-window confusion metrics unavailable: regenerate NPZ with revised preprocessing.")
+        print_metric_report("LogFormer ONLINE — sequence-level (first-alert aggregation)", online["metrics"])
+        if args.show_window_metrics:
+            if online["online_window_decision_metrics"] is not None:
+                print_metric_report("LogFormer ONLINE DIAGNOSTIC ONLY — bounded-window decisions (not Standard)", online["online_window_decision_metrics"])
+            else:
+                print("Online bounded-window diagnostics unavailable: regenerate NPZ with revised preprocessing.")
     if len(reports) == 2:
         print("\n" + "=" * 76)
         print(f"{'Metric':25s} | {'Standard (sequence)':>22s} | {'Online (sequence)':>22s}")
         print("=" * 76)
-        for k in ("Precision", "Recall", "F1", "FPR", "Avg Detection Ratio", "EDR@25", "EDR@50", "EDR@75", "Total Cost"):
+        for k in ("Precision", "Recall", "F1", "FPR", "TP", "TN", "FP", "FN", "Avg Detection Ratio", "EDR@25", "EDR@50", "EDR@75", "False-positive Cost", "False-negative Cost", "Delay Cost", "Total Cost"):
             a, b = reports["standard"][k], reports["online"]["metrics"][k]
             print(f"{k:25s} | {str(round(a, 5)) if a is not None else 'N/A':>22s} | {str(round(b, 5)) if b is not None else 'N/A':>22s}")
         print("=" * 76)
@@ -1317,6 +1318,8 @@ def main():
                         help="Independent causal windows per inference batch; use 1 for literal streaming")
     parser.add_argument("--online-min-events", type=int, default=1,
                         help="Earliest event index with a model decision; default 1 uses right padding")
+    parser.add_argument("--show-window-metrics", action="store_true",
+                        help="Also print separate Online window-level diagnostics (never Standard)")
     args = parser.parse_args()
     if args.online_batch_size < 1 or args.online_min_events < 1:
         parser.error("--online-batch-size and --online-min-events must be >= 1")
