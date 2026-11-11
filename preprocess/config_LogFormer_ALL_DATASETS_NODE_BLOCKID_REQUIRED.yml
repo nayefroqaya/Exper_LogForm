@@ -13,9 +13,16 @@ embed_batch_size: 128
 
 datasets:
   HDFS:
-    train_pkl: ../../LWADLS/datasets/HDFS/train.pkl
-    val_pkl: ../../LWADLS/datasets/HDFS/val.pkl
-    test_pkl: ../../LWADLS/datasets/HDFS/test.pkl
+
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/HDFS/1_HDFS_Splitted_Datasets/test_df.pkl
+
+
+
+
     sequence_mode: existing_blocks
     block_col: Node_block_id  # use BlockId if that is the actual source column
     block_length_mode: pad_truncate
@@ -33,9 +40,12 @@ datasets:
     overlap_id_col: Node_block_id
 
   TH_1G:
-    train_pkl: ../../LWADLS/datasets/TH_1G/train.pkl
-    val_pkl: ../../LWADLS/datasets/TH_1G/val.pkl
-    test_pkl: ../../LWADLS/datasets/TH_1G/test.pkl
+    train_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/train_df.pkl
+
+    val_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/val_df.pkl
+
+    test_pkl: /storage/home/roqaya/LWADLS/datasets/TH_1G/1_TH_1G_Splitted_Datasets/test_df.pkl
+
     sequence_mode: fixed_nonoverlap_rows
     block_length_mode: exact
     overlap_id_col: Node_block_id
