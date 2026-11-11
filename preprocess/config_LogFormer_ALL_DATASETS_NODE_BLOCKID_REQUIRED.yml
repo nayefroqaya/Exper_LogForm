@@ -1,0 +1,62 @@
+# Select any dataset via --dataset BGL / HDFS / TH_1G / TH_2G / SP_150MB_ratio.
+# You can also edit in_domain_dataset_name and omit --dataset.
+setting: in_domain
+in_domain_dataset_name: BGL
+window_size: 120
+preprocessed_dir: preprocess/preprocessed_data
+embedding_model: distilbert-base-nli-mean-tokens
+embed_batch_size: 128
+# Node_block_id exists in ALL original PKL splits and is REQUIRED.
+# Auditing original Node_block_id is mandatory for EVERY dataset.
+# Missing, blank, or cross-split repeated IDs stop preprocessing.
+# The original model training and window construction are unchanged.
+
+datasets:
+  HDFS:
+    train_pkl: ../../LWADLS/datasets/HDFS/train.pkl
+    val_pkl: ../../LWADLS/datasets/HDFS/val.pkl
+    test_pkl: ../../LWADLS/datasets/HDFS/test.pkl
+    sequence_mode: existing_blocks
+    block_col: Node_block_id  # use BlockId if that is the actual source column
+    block_length_mode: pad_truncate
+    overlap_id_col: Node_block_id
+
+  BGL:
+    train_pkl: ../../LWADLS/datasets/BGL/train.pkl
+    val_pkl: ../../LWADLS/datasets/BGL/val.pkl
+    test_pkl: ../../LWADLS/datasets/BGL/test.pkl
+    sequence_mode: fixed_nonoverlap_rows
+    block_length_mode: exact
+    overlap_id_col: Node_block_id
+
+  TH_1G:
+    train_pkl: ../../LWADLS/datasets/TH_1G/train.pkl
+    val_pkl: ../../LWADLS/datasets/TH_1G/val.pkl
+    test_pkl: ../../LWADLS/datasets/TH_1G/test.pkl
+    sequence_mode: fixed_nonoverlap_rows
+    block_length_mode: exact
+    overlap_id_col: Node_block_id
+
+  TH_2G:
+    train_pkl: ../../LWADLS/datasets/TH_2G/train.pkl
+    val_pkl: ../../LWADLS/datasets/TH_2G/val.pkl
+    test_pkl: ../../LWADLS/datasets/TH_2G/test.pkl
+    sequence_mode: fixed_nonoverlap_rows
+    block_length_mode: exact
+    overlap_id_col: Node_block_id
+
+  SP_150MB_ratio:
+    train_pkl: ../../LWADLS/datasets/SP_150MB_ratio/train.pkl
+    val_pkl: ../../LWADLS/datasets/SP_150MB_ratio/val.pkl
+    test_pkl: ../../LWADLS/datasets/SP_150MB_ratio/test.pkl
+    sequence_mode: fixed_nonoverlap_rows
+    block_length_mode: exact
+    overlap_id_col: Node_block_id
+
+  SP_150MB:
+    train_pkl: ../../LWADLS/datasets/SP_150MB/train.pkl
+    val_pkl: ../../LWADLS/datasets/SP_150MB/val.pkl
+    test_pkl: ../../LWADLS/datasets/SP_150MB/test.pkl
+    sequence_mode: fixed_nonoverlap_rows
+    block_length_mode: exact
+    overlap_id_col: Node_block_id
